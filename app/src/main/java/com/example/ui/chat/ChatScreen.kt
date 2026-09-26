@@ -103,6 +103,7 @@ fun ChatScreen(
     val colors = BrutalistTheme.colors
     val myId by viewModel.currentUserId.collectAsState()
     val otherUser by viewModel.otherUser.collectAsState()
+    val canSwitchToOtherUser by viewModel.canSwitchToOtherUser.collectAsState()
     val messages by viewModel.messages.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
     val isOtherTyping by viewModel.isOtherUserTyping.collectAsState()
@@ -262,35 +263,37 @@ fun ChatScreen(
                         }
                     }
 
-                    // Quick Switch Action to test two-way communication easily
-                    Box(
-                        modifier = Modifier
-                            .background(colors.accent, SharpCorner)
-                            .border(1.5.dp, colors.border, SharpCorner)
-                            .clickable {
-                                viewModel.switchUserToOther { newConvId, newOtherId ->
-                                    onSwitchedToOtherUser(newConvId, newOtherId)
+                    // Quick Switch Action only if the other account is also authenticated on this device
+                    if (canSwitchToOtherUser) {
+                        Box(
+                            modifier = Modifier
+                                .background(colors.accent, SharpCorner)
+                                .border(1.5.dp, colors.border, SharpCorner)
+                                .clickable {
+                                    viewModel.switchUserToOther { newConvId, newOtherId ->
+                                        onSwitchedToOtherUser(newConvId, newOtherId)
+                                    }
                                 }
+                                .padding(horizontal = 8.dp, vertical = 5.dp)
+                                .testTag("button_switch_to_other"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.SwapHoriz,
+                                    contentDescription = null,
+                                    tint = colors.accentOn,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "REPLY AS",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Black,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = colors.accentOn
+                                )
                             }
-                            .padding(horizontal = 8.dp, vertical = 5.dp)
-                            .testTag("button_switch_to_other"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.SwapHoriz,
-                                contentDescription = null,
-                                tint = colors.accentOn,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "REPLY AS",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Black,
-                                fontFamily = FontFamily.Monospace,
-                                color = colors.accentOn
-                            )
                         }
                     }
                 }

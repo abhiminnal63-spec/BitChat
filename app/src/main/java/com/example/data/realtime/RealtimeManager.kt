@@ -1,5 +1,10 @@
 package com.example.data.realtime
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,12 +28,56 @@ object RealtimeManager {
     private val _activeUserScreens = MutableStateFlow<Map<String, String>>(emptyMap())
     val activeUserScreens: StateFlow<Map<String, String>> = _activeUserScreens.asStateFlow()
 
-    // Network connectivity simulation state (can be toggled in brutalist debug bar)
+    private var osNetworkAvailable = true
+    private var manualOfflineOverride = false
+    private var networkCallbackRegistered = false
+
+    // Network connectivity state (reflects real OS connectivity and optional debug toggle)
     private val _isNetworkConnected = MutableStateFlow(true)
     val isNetworkConnected: StateFlow<Boolean> = _isNetworkConnected.asStateFlow()
 
+    fun initNetworkMonitoring(context: Context) {
+        if (networkCallbackRegistered) return
+        try {
+            val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return
+            val activeNet = cm.activeNetwork
+            val caps = activeNet?.let { cm.getNetworkCapabilities(it) }
+            osNetworkAvailable = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            updateEffectiveNetworkState()
+
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+
+            cm.registerNetworkCallback(
+                request,
+                object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) {
+                        osNetworkAvailable = true
+                        updateEffectiveNetworkState()
+                    }
+
+                    override fun onLost(network: Network) {
+                        val currentActive = cm.activeNetwork
+                        val currentCaps = currentActive?.let { cm.getNetworkCapabilities(it) }
+                        osNetworkAvailable = currentCaps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+                        updateEffectiveNetworkState()
+                    }
+                }
+            )
+            networkCallbackRegistered = true
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun updateEffectiveNetworkState() {
+        _isNetworkConnected.value = osNetworkAvailable && !manualOfflineOverride
+    }
+
     fun setNetworkConnected(connected: Boolean) {
-        _isNetworkConnected.value = connected
+        manualOfflineOverride = !connected
+        updateEffectiveNetworkState()
     }
 
     fun setUserActiveConversation(userId: String, conversationId: String?) {

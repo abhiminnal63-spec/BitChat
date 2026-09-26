@@ -8,16 +8,16 @@ import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
 import com.example.data.model.MessageStatus
 import com.example.data.model.UserEntity
+import com.example.data.model.buildDeterministicConversationId
 import com.example.data.realtime.RealtimeManager
 import com.example.data.relay.GlobalRelayEngine
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.UUID
 
 data class ConversationItemModel(
     val conversation: ConversationEntity,
@@ -51,7 +51,7 @@ class ChatRepository(
     fun enterConversationScreen(conversationId: String, currentUserId: String? = null) {
         relayEngine?.subscribeToConversation(conversationId)
         if (currentUserId != null) {
-            firestoreSyncManager?.subscribeToConversationTyping(conversationId, currentUserId)
+            firestoreSyncManager?.subscribeToConversation(conversationId, currentUserId)
         }
     }
 
@@ -60,28 +60,39 @@ class ChatRepository(
     }
 
     suspend fun getOrCreateConversation(currentUserId: String, otherUserId: String): String = withContext(Dispatchers.IO) {
-        val existing = conversationDao.findConversationBetween(currentUserId, otherUserId)
-        if (existing != null) {
-            return@withContext existing.id
+        val canonicalId = buildDeterministicConversationId(currentUserId, otherUserId)
+        val existingById = conversationDao.getConversationByIdDirect(canonicalId)
+        if (existingById != null) {
+            return@withContext existingById.id
         }
 
         val sortedIds = listOf(currentUserId.trim(), otherUserId.trim()).sorted()
-        val deterministicId = "conv_${sortedIds[0]}_${sortedIds[1]}"
+        val existingBetween = conversationDao.findConversationBetween(sortedIds[0], sortedIds[1])
+        if (existingBetween != null && existingBetween.id == canonicalId) {
+            return@withContext existingBetween.id
+        }
+
         val now = System.currentTimeMillis()
         val newConv = ConversationEntity(
-            id = deterministicId,
+            id = canonicalId,
             participant1Id = sortedIds[0],
             participant2Id = sortedIds[1],
-            lastMessageText = "",
-            lastMessageTimestamp = now,
-            lastMessageSenderId = "",
-            unreadCountForUser1 = 0,
-            unreadCountForUser2 = 0,
+            lastMessageText = existingBetween?.lastMessageText ?: "",
+            lastMessageTimestamp = existingBetween?.lastMessageTimestamp ?: now,
+            lastMessageSenderId = existingBetween?.lastMessageSenderId ?: "",
+            lastMessageStatus = existingBetween?.lastMessageStatus ?: MessageStatus.SENT.name,
+            unreadCountForUser1 = existingBetween?.unreadCountForUser1 ?: 0,
+            unreadCountForUser2 = existingBetween?.unreadCountForUser2 ?: 0,
             updatedAt = now
         )
         conversationDao.insertConversation(newConv)
         firestoreSyncManager?.syncConversationToCloud(newConv)
-        deterministicId
+
+        val p1Profile = userDao.getUserByIdDirect(sortedIds[0])
+        val p2Profile = userDao.getUserByIdDirect(sortedIds[1])
+        relayEngine?.syncConversationToCloud(newConv, p1Profile, p2Profile)
+
+        canonicalId
     }
 
     suspend fun sendMessage(
@@ -96,22 +107,14 @@ class ChatRepository(
     ): MessageEntity = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         val messageId = UUID.randomUUID().toString()
+        val canonicalConvId = buildDeterministicConversationId(senderId, recipientId)
 
-        // Check if recipient is viewing conversation right now
-        val isRecipientViewing = RealtimeManager.isUserViewingConversation(recipientId, conversationId)
-
-        val recipientUser = userDao.getUserByIdDirect(recipientId)
-        val isRecipientOnline = recipientUser?.isOnline == true
-
-        val initialStatus = when {
-            isRecipientViewing -> MessageStatus.READ.name
-            isRecipientOnline -> MessageStatus.DELIVERED.name
-            else -> MessageStatus.SENT.name
-        }
+        // Messages always start as SENT on the sender device; DELIVERED and READ come only from the recipient's backend confirmation
+        val initialStatus = MessageStatus.SENT.name
 
         val message = MessageEntity(
             id = messageId,
-            conversationId = conversationId,
+            conversationId = canonicalConvId,
             senderId = senderId,
             recipientId = recipientId,
             content = content.trim(),
@@ -125,83 +128,94 @@ class ChatRepository(
 
         messageDao.insertMessage(message)
 
-        // Sync to cloud (Firestore & Global Relay)
-        firestoreSyncManager?.syncMessageToCloud(message)
-        relayEngine?.broadcastMessage(message)
+        val senderProfile = userDao.getUserByIdDirect(senderId)
+        val receiverProfile = userDao.getUserByIdDirect(recipientId)
 
         // Stop typing immediately once message is sent
-        stopTyping(conversationId, senderId)
+        stopTyping(canonicalConvId, senderId, recipientId)
 
-        // Update conversation summary
-        val conv = conversationDao.getConversationByIdDirect(conversationId)
-        if (conv != null) {
-            val previewText = when {
-                attachmentType != null && content.isNotBlank() -> "📷 $content"
-                attachmentType != null -> "📷 Photo attachment"
-                else -> content.trim()
-            }
-
-            val isSenderUser1 = conv.participant1Id == senderId
-            val newUnreadUser1 = if (!isSenderUser1 && !isRecipientViewing) conv.unreadCountForUser1 + 1 else if (isSenderUser1) conv.unreadCountForUser1 else 0
-            val newUnreadUser2 = if (isSenderUser1 && !isRecipientViewing) conv.unreadCountForUser2 + 1 else if (!isSenderUser1) conv.unreadCountForUser2 else 0
-
-            val updatedConv = conv.copy(
-                lastMessageText = previewText,
-                lastMessageTimestamp = now,
-                lastMessageSenderId = senderId,
-                lastMessageStatus = initialStatus,
-                unreadCountForUser1 = newUnreadUser1,
-                unreadCountForUser2 = newUnreadUser2,
-                updatedAt = now
-            )
-            conversationDao.updateConversation(updatedConv)
-            firestoreSyncManager?.syncConversationToCloud(updatedConv)
+        // Update conversation summary using deterministic ID
+        val sortedIds = listOf(senderId.trim(), recipientId.trim()).sorted()
+        val existingConv = conversationDao.getConversationByIdDirect(canonicalConvId)
+        val previewText = when {
+            attachmentType != null && content.isNotBlank() -> "📷 $content"
+            attachmentType != null -> "📷 Photo attachment"
+            else -> content.trim()
         }
+
+        val updatedConv = ConversationEntity(
+            id = canonicalConvId,
+            participant1Id = sortedIds[0],
+            participant2Id = sortedIds[1],
+            lastMessageText = previewText,
+            lastMessageTimestamp = now,
+            lastMessageSenderId = senderId,
+            lastMessageStatus = initialStatus,
+            unreadCountForUser1 = existingConv?.unreadCountForUser1 ?: 0,
+            unreadCountForUser2 = existingConv?.unreadCountForUser2 ?: 0,
+            updatedAt = now
+        )
+        conversationDao.insertConversation(updatedConv)
+
+        // Sync to shared cloud backend (Firestore & GlobalRelayEngine)
+        firestoreSyncManager?.syncMessageToCloud(message)
+        firestoreSyncManager?.syncConversationToCloud(updatedConv)
+        relayEngine?.publishMessageToCloud(message, senderProfile, receiverProfile)
 
         message
     }
 
     suspend fun markConversationAsRead(conversationId: String, readerId: String) = withContext(Dispatchers.IO) {
-        // Update all messages directed to readerId in this conversation to READ
+        val unreadCount = messageDao.getUnreadCount(conversationId, readerId)
         messageDao.updateStatusForConversation(
             conversationId = conversationId,
             recipientId = readerId,
             status = MessageStatus.READ.name
         )
-        messageDao.markAllInConversationAsRead(conversationId, MessageStatus.READ.name)
-        conversationDao.updateLastMessageStatus(conversationId, MessageStatus.READ.name)
-        firestoreSyncManager?.markAllAsReadInCloud(conversationId, readerId)
 
         val conv = conversationDao.getConversationByIdDirect(conversationId)
         if (conv != null) {
-            val senderId = if (conv.participant1Id == readerId) conv.participant2Id else conv.participant1Id
-            relayEngine?.broadcastReadReceipt(conversationId, null, readerId, senderId)
-
+            val otherUserId = if (conv.participant1Id == readerId) conv.participant2Id else conv.participant1Id
             if (conv.participant1Id == readerId) {
                 conversationDao.clearUnreadForUser1(conversationId)
             } else {
                 conversationDao.clearUnreadForUser2(conversationId)
             }
+
+            if (conv.lastMessageSenderId == otherUserId && (unreadCount > 0 || conv.lastMessageStatus != MessageStatus.READ.name)) {
+                conversationDao.updateLastMessageStatus(conversationId, MessageStatus.READ.name)
+                firestoreSyncManager?.markAllAsReadInCloud(conversationId, readerId)
+                relayEngine?.broadcastReadReceipt(conversationId, null, readerId, otherUserId)
+            }
         }
     }
 
-    fun notifyTyping(conversationId: String, userId: String) {
-        RealtimeManager.onUserTyping(conversationId, userId)
+    fun notifyTyping(conversationId: String, userId: String, recipientId: String? = null) {
         val key = "${conversationId}_$userId"
         val now = System.currentTimeMillis()
         val lastSync = lastCloudTypingSync[key] ?: 0L
         if (now - lastSync >= 900L) {
             lastCloudTypingSync[key] = now
             firestoreSyncManager?.updateTypingStatusInCloud(conversationId, userId, true)
-            relayEngine?.broadcastTyping(conversationId, userId, true)
+            repoScope.launch {
+                val targetRecipient = recipientId ?: resolveOtherParticipant(conversationId, userId)
+                relayEngine?.broadcastTyping(conversationId, userId, targetRecipient, true)
+            }
         }
     }
 
-    fun stopTyping(conversationId: String, userId: String) {
+    fun stopTyping(conversationId: String, userId: String, recipientId: String? = null) {
         val key = "${conversationId}_$userId"
         lastCloudTypingSync.remove(key)
-        RealtimeManager.stopUserTyping(conversationId, userId)
         firestoreSyncManager?.updateTypingStatusInCloud(conversationId, userId, false)
-        relayEngine?.broadcastTyping(conversationId, userId, false)
+        repoScope.launch {
+            val targetRecipient = recipientId ?: resolveOtherParticipant(conversationId, userId)
+            relayEngine?.broadcastTyping(conversationId, userId, targetRecipient, false)
+        }
+    }
+
+    private suspend fun resolveOtherParticipant(conversationId: String, userId: String): String? {
+        val conv = conversationDao.getConversationByIdDirect(conversationId) ?: return null
+        return if (conv.participant1Id == userId) conv.participant2Id else conv.participant1Id
     }
 }

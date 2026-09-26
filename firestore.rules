@@ -1,0 +1,82 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Public user profiles: readable/searchable by authenticated users, writable only by the owner UID
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      allow create, update: if isOwner(uid)
+        && request.resource.data.uid == uid
+        && !('passwordHash' in request.resource.data);
+      allow delete: if false;
+    }
+
+    // Normalized username uniqueness index
+    match /usernames/{usernameNormalized} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.usernameNormalized == usernameNormalized
+        && !exists(/databases/$(database)/documents/usernames/$(usernameNormalized));
+      allow update: if isSignedIn()
+        && resource.data.uid == request.auth.uid
+        && request.resource.data.uid == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // Shared conversations between two backend UIDs: accessible only by participants
+    match /conversations/{conversationId} {
+      allow read: if isSignedIn()
+        && request.auth.uid in resource.data.participants;
+
+      allow create: if isSignedIn()
+        && request.auth.uid in request.resource.data.participants
+        && request.resource.data.participants.size() == 2;
+
+      allow update: if isSignedIn()
+        && request.auth.uid in resource.data.participants
+        && request.resource.data.participants == resource.data.participants;
+
+      allow delete: if false;
+
+      // Messages inside a conversation
+      match /messages/{messageId} {
+        allow read: if isSignedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants;
+
+        // Only the authenticated sender may create a message with their own senderId
+        allow create: if isSignedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.conversationId == conversationId;
+
+        // Receiver may only update message delivery/read status
+        allow update: if isSignedIn()
+          && (
+            (resource.data.receiverId == request.auth.uid
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']))
+            || (resource.data.senderId == request.auth.uid
+              && request.resource.data.senderId == resource.data.senderId)
+          );
+
+        allow delete: if false;
+      }
+
+      // Real-time typing state per participant
+      match /typing/{typingUserId} {
+        allow read: if isSignedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants;
+        allow create, update: if isOwner(typingUserId);
+        allow delete: if isOwner(typingUserId);
+      }
+    }
+  }
+}

@@ -54,24 +54,25 @@ class HomeViewModel(
     val isNetworkConnected: StateFlow<Boolean> = RealtimeManager.isNetworkConnected
 
     init {
-        // Proactively sync registered users from the shared cloud backend when session starts
+        // Proactively query the shared cloud backend when session starts
         viewModelScope.launch {
             userRepository.currentUserId.collect { uid ->
-                if (!uid.isNullOrBlank() && RealtimeManager.isNetworkConnected.value) {
-                    userRepository.searchUsersInBackend("", uid)
+                if (!uid.isNullOrBlank()) {
+                    triggerBackendSearch(_uiState.value.searchQuery, immediate = true)
                 }
             }
         }
     }
 
-    val allRegisteredUsers: StateFlow<List<UserEntity>> = userRepository.getAllUsersFlow()
+    // ONLY accounts that have explicitly authenticated on THIS physical device (for local session switcher)
+    val allRegisteredUsers: StateFlow<List<UserEntity>> = userRepository.getLocalAuthenticatedSessionsFlow()
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
             initialValue = emptyList()
         )
 
-    // Reactive conversations list
+    // Reactive conversations list backed by shared cloud conversations
     val conversationsList: StateFlow<List<EnrichedConversation>> = userRepository.currentUserId
         .flatMapLatest { userId ->
             if (userId == null) {
@@ -80,41 +81,58 @@ class HomeViewModel(
                 combine(
                     chatRepository.getConversationsForUser(userId),
                     userDao.getAllUsersFlow(),
+                    _backendSearchResults,
                     RealtimeManager.typingUsers,
                     _uiState
-                ) { rawConversations, allUsers, typingMap, state ->
-                    val userMap = allUsers.associateBy { it.id }
+                ) { rawConversations, allUsers, backendUsers, typingMap, state ->
+                    val userMap = linkedMapOf<String, UserEntity>()
+                    for (u in allUsers) userMap[u.id] = u
+                    for (u in backendUsers) userMap[u.id] = u
 
-                    rawConversations.mapNotNull { conv ->
-                        val otherId = if (conv.participant1Id == userId) conv.participant2Id else conv.participant1Id
-                        val otherUser = userMap[otherId] ?: return@mapNotNull null
-
-                        val unreadCount = if (conv.participant1Id == userId) conv.unreadCountForUser1 else conv.unreadCountForUser2
-                        val typingSet = typingMap[conv.id] ?: emptySet()
-                        val isTyping = typingSet.contains(otherId)
-
-                        EnrichedConversation(
-                            conversation = conv,
-                            otherUser = otherUser,
-                            unreadCount = unreadCount,
-                            isOtherUserTyping = isTyping
-                        )
-                    }.filter { enriched ->
-                        val normQ = normalizeUsername(state.searchQuery)
-                        if (normQ.isBlank()) true
-                        else {
-                            val rawLower = state.searchQuery.trim().lowercase()
-                            enriched.otherUser.usernameNormalized.contains(normQ) ||
-                                enriched.otherUser.username.lowercase().contains(normQ) ||
-                                enriched.otherUser.displayName.lowercase().contains(normQ) ||
-                                enriched.conversation.lastMessageText.lowercase().contains(rawLower)
+                    rawConversations
+                        .filter { it.lastMessageText.isNotBlank() || it.lastMessageTimestamp > 0L }
+                        .distinctBy { conv ->
+                            if (conv.participant1Id == userId) conv.participant2Id else conv.participant1Id
                         }
-                    }
+                        .mapNotNull { conv ->
+                            val otherId = if (conv.participant1Id == userId) conv.participant2Id else conv.participant1Id
+                            if (otherId.isBlank() || otherId == userId) return@mapNotNull null
+
+                            val otherUser = userMap[otherId] ?: UserEntity(
+                                id = otherId,
+                                username = otherId.removePrefix("uid_").take(8),
+                                usernameNormalized = otherId.removePrefix("uid_").take(8).lowercase(),
+                                displayName = "User ${otherId.removePrefix("uid_").take(6)}",
+                                statusMessage = "Synced from Cloud",
+                                isOnline = false
+                            )
+
+                            val unreadCount = if (conv.participant1Id == userId) conv.unreadCountForUser1 else conv.unreadCountForUser2
+                            val typingSet = typingMap[conv.id] ?: emptySet()
+                            val isTyping = typingSet.contains(otherId)
+
+                            EnrichedConversation(
+                                conversation = conv,
+                                otherUser = otherUser,
+                                unreadCount = unreadCount,
+                                isOtherUserTyping = isTyping
+                            )
+                        }.filter { enriched ->
+                            val normQ = normalizeUsername(state.searchQuery)
+                            if (normQ.isBlank()) true
+                            else {
+                                val rawLower = state.searchQuery.trim().lowercase()
+                                enriched.otherUser.usernameNormalized.contains(normQ) ||
+                                    enriched.otherUser.username.lowercase().contains(normQ) ||
+                                    enriched.otherUser.displayName.lowercase().contains(normQ) ||
+                                    enriched.conversation.lastMessageText.lowercase().contains(rawLower)
+                            }
+                        }
                 }
             }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Real-time cloud + synced directory users matching normalized username query
+    // Shared cloud DIRECTORY users (queries backend users collection, never local sessions)
     val directoryUsers: StateFlow<List<UserEntity>> = combine(
         userRepository.currentUserId,
         userDao.getAllUsersFlow(),
@@ -161,6 +179,9 @@ class HomeViewModel(
 
     fun setActiveTab(index: Int) {
         _uiState.value = _uiState.value.copy(activeTab = index)
+        if (index == 1) {
+            triggerBackendSearch(_uiState.value.searchQuery, immediate = true)
+        }
     }
 
     fun onSearchQueryChange(query: String) {
@@ -178,14 +199,6 @@ class HomeViewModel(
     private fun triggerBackendSearch(rawQuery: String, immediate: Boolean = false) {
         searchJob?.cancel()
         val normQ = normalizeUsername(rawQuery)
-        if (rawQuery.isBlank() && !immediate) {
-            _backendSearchResults.value = emptyList()
-            _uiState.value = _uiState.value.copy(
-                isSearchingBackend = false,
-                searchErrorMessage = null
-            )
-            return
-        }
 
         searchJob = viewModelScope.launch {
             if (!RealtimeManager.isNetworkConnected.value) {
@@ -254,7 +267,7 @@ class HomeViewModel(
     fun toggleNetworkSimulation() {
         val newState = !isNetworkConnected.value
         RealtimeManager.setNetworkConnected(newState)
-        if (_uiState.value.searchQuery.isNotBlank()) {
+        if (_uiState.value.searchQuery.isNotBlank() || _uiState.value.activeTab == 1) {
             triggerBackendSearch(_uiState.value.searchQuery, immediate = true)
         }
     }

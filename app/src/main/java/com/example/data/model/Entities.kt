@@ -5,11 +5,16 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 
 fun normalizeUsername(raw: String): String {
-    return raw.trim().trimStart('@').trim().lowercase()
+    return raw.replace("@", "").trim().lowercase()
 }
 
 fun cleanDisplayUsername(raw: String): String {
-    return raw.trim().trimStart('@').trim()
+    return raw.replace("@", "").trim()
+}
+
+fun buildDeterministicConversationId(uidA: String, uidB: String): String {
+    val sorted = listOf(uidA.trim(), uidB.trim()).sorted()
+    return "${sorted[0]}_${sorted[1]}"
 }
 
 @Entity(

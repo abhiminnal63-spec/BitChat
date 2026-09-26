@@ -42,6 +42,11 @@ class ChatViewModel(
     val otherUser: StateFlow<UserEntity?> = userDao.getUserById(otherUserId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
+    val canSwitchToOtherUser: StateFlow<Boolean> = userRepository.getLocalAuthenticatedSessionsFlow()
+        .combine(MutableStateFlow(otherUserId)) { localSessions, peerId ->
+            localSessions.any { it.id == peerId }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
     val messages: StateFlow<List<MessageEntity>> = chatRepository.getMessagesForConversation(conversationId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -75,7 +80,7 @@ class ChatViewModel(
         val myId = currentUserId.value ?: return
         RealtimeManager.setUserActiveConversation(myId, null)
         chatRepository.exitConversationScreen(conversationId)
-        chatRepository.stopTyping(conversationId, myId)
+        chatRepository.stopTyping(conversationId, myId, otherUserId)
     }
 
     fun onTextInputChange(text: String) {
@@ -83,13 +88,13 @@ class ChatViewModel(
         val myId = currentUserId.value ?: return
         typingDebounceJob?.cancel()
         if (text.isNotBlank()) {
-            chatRepository.notifyTyping(conversationId, myId)
+            chatRepository.notifyTyping(conversationId, myId, otherUserId)
             typingDebounceJob = viewModelScope.launch {
                 delay(2200L)
-                chatRepository.stopTyping(conversationId, myId)
+                chatRepository.stopTyping(conversationId, myId, otherUserId)
             }
         } else {
-            chatRepository.stopTyping(conversationId, myId)
+            chatRepository.stopTyping(conversationId, myId, otherUserId)
         }
     }
 
@@ -162,10 +167,11 @@ class ChatViewModel(
     fun switchUserToOther(onSwitched: (newConversationId: String, newOtherUserId: String) -> Unit) {
         val myId = currentUserId.value ?: return
         viewModelScope.launch {
-            // Switch session to other user
-            userRepository.switchUser(otherUserId)
-            // Reverse conversation roles
-            onSwitched(conversationId, myId)
+            // Only switch if the other account is actually authenticated on this device
+            val result = userRepository.switchUser(otherUserId)
+            if (result.isSuccess) {
+                onSwitched(conversationId, myId)
+            }
         }
     }
 

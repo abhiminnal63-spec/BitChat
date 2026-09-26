@@ -29,7 +29,7 @@ class AuthViewModel(
     private val _uiState = MutableStateFlow(AuthUiState())
     val uiState: StateFlow<AuthUiState> = _uiState.asStateFlow()
 
-    val registeredUsers: StateFlow<List<UserEntity>> = userRepository.getAllUsersFlow()
+    val registeredUsers: StateFlow<List<UserEntity>> = userRepository.getLocalAuthenticatedSessionsFlow()
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
