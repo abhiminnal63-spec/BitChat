@@ -113,6 +113,8 @@ fun ChatScreen(
     val colors = BrutalistTheme.colors
     val myId by viewModel.currentUserId.collectAsState()
     val otherUser by viewModel.otherUser.collectAsState()
+    val isProfileLoading by viewModel.isProfileLoading.collectAsState()
+    val isProfileUnavailable by viewModel.isProfileUnavailable.collectAsState()
     val canSwitchToOtherUser by viewModel.canSwitchToOtherUser.collectAsState()
     val messages by viewModel.messages.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
@@ -205,97 +207,122 @@ fun ChatScreen(
                         )
                     }
 
+                    val hasRealProfile = otherUser != null && otherUser?.displayName?.isNotBlank() == true
                     val peerEffectiveOnline = DateTimeUtils.isEffectivelyOnline(
                         isOnline = otherUser?.isOnline == true,
                         lastSeenTimestamp = otherUser?.lastSeenTimestamp ?: 0L,
                         now = nowTick
                     )
 
-                    // Recipient Avatar + Name (clickable to view peer profile)
+                    val headerDisplayName = when {
+                        hasRealProfile -> otherUser!!.displayName
+                        isProfileUnavailable -> "Profile unavailable"
+                        else -> "Loading profile..."
+                    }
+
+                    // Recipient Avatar + Name (clickable to view peer profile if loaded, or retry if unavailable)
                     Row(
                         modifier = Modifier
                             .weight(1f)
-                            .clickable { isPeerProfileModalOpen = true }
+                            .clickable {
+                                if (hasRealProfile) {
+                                    isPeerProfileModalOpen = true
+                                } else if (isProfileUnavailable) {
+                                    viewModel.retryFetchProfile()
+                                }
+                            }
                             .testTag("chat_header_peer_profile_button"),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         BrutalistAvatar(
-                            seedOrName = otherUser?.displayName ?: "USER",
-                            avatarId = otherUser?.avatarSeed,
+                            seedOrName = if (hasRealProfile) otherUser!!.displayName else "?",
+                            avatarId = if (hasRealProfile) otherUser?.avatarSeed else null,
                             size = 38.dp,
-                            isOnline = peerEffectiveOnline
+                            isOnline = if (hasRealProfile) peerEffectiveOnline else false
                         )
 
                         Spacer(modifier = Modifier.width(10.dp))
 
-                        // Name + Status with Real-time Firestore Typing Indicator & Last Seen Time
+                        // Name + Status with Real-time Firestore/Relay Presence & Last Seen Time
                         Column(
                             modifier = Modifier.weight(1f)
                         ) {
-                        Text(
-                            text = otherUser?.displayName ?: "Loading...",
-                            fontWeight = FontWeight.Black,
-                            fontSize = 14.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = colors.textPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        AnimatedContent(
-                            targetState = isOtherTyping,
-                            transitionSpec = {
-                                fadeIn(animationSpec = tween(180)) togetherWith fadeOut(animationSpec = tween(140))
-                            },
-                            label = "header_typing_status"
-                        ) { typingActive ->
-                            if (typingActive) {
-                                val infiniteTransition = rememberInfiniteTransition(label = "header_typing_pulse")
-                                val dotAlpha by infiniteTransition.animateFloat(
-                                    initialValue = 0.35f,
-                                    targetValue = 1f,
-                                    animationSpec = infiniteRepeatable(
-                                        animation = tween(450),
-                                        repeatMode = RepeatMode.Reverse
-                                    ),
-                                    label = "typing_dot_alpha"
-                                )
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.testTag("chat_header_typing_indicator")
-                                ) {
-                                    Text(
-                                        text = "●",
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Black,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = EasappOnlineGreen.copy(alpha = dotAlpha)
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = "typing...",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Black,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = EasappOnlineGreen
-                                    )
+                            Text(
+                                text = headerDisplayName,
+                                fontWeight = FontWeight.Black,
+                                fontSize = 14.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = colors.textPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (hasRealProfile) {
+                                AnimatedContent(
+                                    targetState = isOtherTyping,
+                                    transitionSpec = {
+                                        fadeIn(animationSpec = tween(180)) togetherWith fadeOut(animationSpec = tween(140))
+                                    },
+                                    label = "header_typing_status"
+                                ) { typingActive ->
+                                    if (typingActive) {
+                                        val infiniteTransition = rememberInfiniteTransition(label = "header_typing_pulse")
+                                        val dotAlpha by infiniteTransition.animateFloat(
+                                            initialValue = 0.35f,
+                                            targetValue = 1f,
+                                            animationSpec = infiniteRepeatable(
+                                                animation = tween(450),
+                                                repeatMode = RepeatMode.Reverse
+                                            ),
+                                            label = "typing_dot_alpha"
+                                        )
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.testTag("chat_header_typing_indicator")
+                                        ) {
+                                            Text(
+                                                text = "●",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Black,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = EasappOnlineGreen.copy(alpha = dotAlpha)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = "typing...",
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Black,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = EasappOnlineGreen
+                                            )
+                                        }
+                                    } else {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            val lastSeenText = DateTimeUtils.formatLastSeen(
+                                                isOnline = peerEffectiveOnline,
+                                                lastSeenTimestamp = otherUser?.lastSeenTimestamp ?: 0L,
+                                                now = nowTick
+                                            ).uppercase()
+                                            Text(
+                                                text = "• $lastSeenText",
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = if (peerEffectiveOnline) EasappOnlineGreen else colors.textSecondary
+                                            )
+                                        }
+                                    }
                                 }
-                            } else {
+                            } else if (isProfileUnavailable) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    val lastSeenText = DateTimeUtils.formatLastSeen(
-                                        isOnline = peerEffectiveOnline,
-                                        lastSeenTimestamp = otherUser?.lastSeenTimestamp ?: 0L,
-                                        now = nowTick
-                                    )
                                     Text(
-                                        text = "• $lastSeenText",
+                                        text = "• Reconnecting...",
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold,
                                         fontFamily = FontFamily.Monospace,
-                                        color = if (peerEffectiveOnline) EasappOnlineGreen else colors.textSecondary
+                                        color = colors.textSecondary
                                     )
                                 }
                             }
-                        }
                         }
                     }
 
@@ -404,7 +431,7 @@ fun ChatScreen(
                                     viewModel.setPreviewImage(uri)
                                 },
                                 onShareImage = { uri ->
-                                    ImageUtils.shareImage(context, uri, "Shared via Easapp")
+                                    ImageUtils.shareImage(context, uri, "Shared via BITCHAT")
                                 },
                                 onRetryMessage = { msgId ->
                                     viewModel.retryMessage(msgId)
@@ -623,7 +650,7 @@ fun ChatScreen(
                         BrutalistButton(
                             text = "SHARE IMAGE TO APPS ->",
                             onClick = {
-                                ImageUtils.shareImage(context, uiState.previewImageUri!!, "Shared via Easapp")
+                                ImageUtils.shareImage(context, uiState.previewImageUri!!, "Shared via BITCHAT")
                             },
                             modifier = Modifier.fillMaxWidth(),
                             backgroundColor = colors.accent,
@@ -744,7 +771,7 @@ fun ChatScreen(
                         Spacer(modifier = Modifier.height(10.dp))
 
                         Text(
-                            text = peer.statusMessage.ifBlank { "Available on Easapp" },
+                            text = peer.statusMessage.ifBlank { "Available on BITCHAT" },
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                             color = colors.textPrimary

@@ -390,5 +390,76 @@ class ExampleRobolectricTest {
         chatRepo.flushPendingMessages(convAbinTester)
         relayEngine.stop()
     }
+
+    @Test
+    fun `chat header recipient real profile loading, online status, and last seen formatting`() = runBlocking {
+        val userDao = database.userDao()
+        val convDao = database.conversationDao()
+        val msgDao = database.messageDao()
+
+        val relayEngine = GlobalRelayEngine(
+            userDao = userDao,
+            conversationDao = convDao,
+            messageDao = msgDao
+        )
+        val userRepo = UserRepository(
+            userDao = userDao,
+            context = context,
+            firestoreSyncManager = null,
+            relayEngine = relayEngine
+        )
+        val chatRepo = ChatRepository(
+            conversationDao = convDao,
+            messageDao = msgDao,
+            userDao = userDao,
+            firestoreSyncManager = null,
+            relayEngine = relayEngine,
+            appContext = context
+        )
+
+        // 1. Create recipient @abhi with real display name "Abhinav"
+        val abhi = userRepo.registerUser("abhi", "Abhinav", "pass1234").getOrThrow()
+        assertEquals("Abhinav", abhi.displayName)
+        assertEquals("abhi", abhi.usernameNormalized)
+
+        // 2. Create sender @brutt
+        val brutt = userRepo.registerUser("brutt_sender", "Brutt", "pass1234").getOrThrow()
+        userRepo.switchUser(brutt.id)
+
+        // 3. Open conversation with recipient UID
+        val convId = chatRepo.getOrCreateConversation(brutt.id, abhi.id)
+        val chatVm = com.example.ui.chat.ChatViewModel(
+            conversationId = convId,
+            otherUserId = abhi.id,
+            chatRepository = chatRepo,
+            userRepository = userRepo,
+            userDao = userDao
+        )
+
+        // Verify recipient profile resolves to real display name "Abhinav" (never "Loading..." as permanent name or "User xxxxx")
+        val fetchedResult = userRepo.fetchAndCacheUserById(abhi.id)
+        assertTrue("Profile fetch must succeed", fetchedResult.isSuccess)
+        val resolvedPeer = userDao.getUserById(abhi.id).first()
+        assertNotNull("Recipient profile must be resolved in database", resolvedPeer)
+        assertEquals("Abhinav", resolvedPeer?.displayName)
+        assertFalse("Never generate fallback 'User ' display name", resolvedPeer?.displayName?.startsWith("User ") == true)
+
+        // 4. Test real-time presence formatting
+        val now = System.currentTimeMillis()
+        val onlineText = DateTimeUtils.formatLastSeen(isOnline = true, lastSeenTimestamp = now, now = now)
+        assertEquals("ONLINE", onlineText)
+
+        // Offline today (e.g. 10 minutes ago)
+        val tenMinAgo = now - 10 * 60 * 1000L
+        val todayOfflineText = DateTimeUtils.formatLastSeen(isOnline = false, lastSeenTimestamp = tenMinAgo, now = now).uppercase()
+        assertTrue("Must format as LAST SEEN TODAY AT [time]", todayOfflineText.startsWith("LAST SEEN TODAY AT"))
+
+        // Offline yesterday
+        val yesterday = now - 24 * 60 * 60 * 1000L
+        val yesterdayOfflineText = DateTimeUtils.formatLastSeen(isOnline = false, lastSeenTimestamp = yesterday, now = now).uppercase()
+        assertTrue("Must format as LAST SEEN YESTERDAY AT [time]", yesterdayOfflineText.startsWith("LAST SEEN YESTERDAY AT"))
+
+        relayEngine.stop()
+    }
 }
 

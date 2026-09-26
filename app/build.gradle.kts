@@ -102,6 +102,7 @@ dependencies {
   // implementation(libs.firebase.ai)
   // Firestore for cloud sync & real-time messaging:
   implementation(libs.firebase.firestore)
+  implementation(libs.firebase.messaging)
   implementation(libs.okhttp)
 
   // Uncomment ALL FOUR of the following dependencies together to use Firebase Auth and Google

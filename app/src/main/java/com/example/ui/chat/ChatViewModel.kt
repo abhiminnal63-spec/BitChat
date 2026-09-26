@@ -47,6 +47,12 @@ class ChatViewModel(
     val otherUser: StateFlow<UserEntity?> = userDao.getUserById(otherUserId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
+    private val _isProfileLoading = MutableStateFlow(false)
+    val isProfileLoading: StateFlow<Boolean> = _isProfileLoading.asStateFlow()
+
+    private val _isProfileUnavailable = MutableStateFlow(false)
+    val isProfileUnavailable: StateFlow<Boolean> = _isProfileUnavailable.asStateFlow()
+
     val canSwitchToOtherUser: StateFlow<Boolean> = userRepository.getLocalAuthenticatedSessionsFlow()
         .combine(MutableStateFlow(otherUserId)) { localSessions, peerId ->
             localSessions.any { it.id == peerId }
@@ -67,9 +73,21 @@ class ChatViewModel(
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
     private var typingDebounceJob: Job? = null
+    private var profileFetchJob: Job? = null
 
     init {
         onEnterScreen()
+        loadRecipientProfile()
+
+        // Automatically retry profile fetch when network reconnects if previously failed
+        viewModelScope.launch {
+            RealtimeManager.isNetworkConnected.collect { connected ->
+                if (connected && (_isProfileUnavailable.value || otherUser.value == null)) {
+                    loadRecipientProfile()
+                }
+            }
+        }
+
         // Automatically mark incoming messages as READ while the conversation is open
         viewModelScope.launch {
             messages.collect { list ->
@@ -84,10 +102,34 @@ class ChatViewModel(
         }
     }
 
+    fun loadRecipientProfile() {
+        if (otherUserId.isBlank()) return
+        profileFetchJob?.cancel()
+        profileFetchJob = viewModelScope.launch {
+            val local = userDao.getUserByIdDirect(otherUserId)
+            if (local == null || local.displayName.isBlank()) {
+                _isProfileLoading.value = true
+            }
+            val result = userRepository.fetchAndCacheUserById(otherUserId)
+            _isProfileLoading.value = false
+            val updatedLocal = userDao.getUserByIdDirect(otherUserId)
+            if (result.isFailure && updatedLocal == null) {
+                _isProfileUnavailable.value = true
+            } else {
+                _isProfileUnavailable.value = false
+            }
+        }
+    }
+
+    fun retryFetchProfile() {
+        loadRecipientProfile()
+    }
+
     fun onEnterScreen() {
         val myId = currentUserId.value ?: return
         RealtimeManager.setUserActiveConversation(myId, conversationId)
         chatRepository.enterConversationScreen(conversationId, myId)
+        loadRecipientProfile()
         viewModelScope.launch {
             chatRepository.markConversationAsRead(conversationId, myId)
         }

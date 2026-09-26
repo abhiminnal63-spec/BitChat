@@ -74,6 +74,19 @@ class HomeViewModel(
             initialValue = emptyList()
         )
 
+    private val fetchingPeerProfileIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    private fun triggerFetchPeerProfile(peerId: String) {
+        if (peerId.isBlank() || !fetchingPeerProfileIds.add(peerId)) return
+        viewModelScope.launch {
+            try {
+                userRepository.fetchAndCacheUserById(peerId)
+            } finally {
+                fetchingPeerProfileIds.remove(peerId)
+            }
+        }
+    }
+
     // Reactive conversations list backed by shared cloud conversations and per-user deletion state
     val conversationsList: StateFlow<List<EnrichedConversation>> = userRepository.currentUserId
         .flatMapLatest { userId ->
@@ -105,14 +118,17 @@ class HomeViewModel(
                             val otherId = if (conv.participant1Id == userId) conv.participant2Id else conv.participant1Id
                             if (otherId.isBlank() || otherId == userId) return@mapNotNull null
 
-                            val otherUser = userMap[otherId] ?: UserEntity(
-                                id = otherId,
-                                username = otherId.removePrefix("uid_").take(8),
-                                usernameNormalized = otherId.removePrefix("uid_").take(8).lowercase(),
-                                displayName = "User ${otherId.removePrefix("uid_").take(6)}",
-                                statusMessage = "Synced from Cloud",
-                                isOnline = false
-                            )
+                            val otherUser = userMap[otherId] ?: run {
+                                triggerFetchPeerProfile(otherId)
+                                UserEntity(
+                                    id = otherId,
+                                    username = "",
+                                    usernameNormalized = "",
+                                    displayName = "Loading profile...",
+                                    statusMessage = "Available on Easapp",
+                                    isOnline = false
+                                )
+                            }
 
                             val unreadCount = if (conv.participant1Id == userId) conv.unreadCountForUser1 else conv.unreadCountForUser2
                             val typingSet = typingMap[conv.id] ?: emptySet()

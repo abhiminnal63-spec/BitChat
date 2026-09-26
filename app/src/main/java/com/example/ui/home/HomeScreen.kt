@@ -66,6 +66,7 @@ import com.example.ui.theme.EasappOnlineGreen
 import com.example.ui.theme.EasappSecondary
 import com.example.ui.theme.MessageStatusIndicator
 import com.example.ui.theme.SharpCorner
+import com.example.ui.theme.ShootingStarFontFamily
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -115,11 +116,11 @@ fun HomeScreen(
                         Column {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    text = "EASAPP",
+                                    text = "BITCHAT",
                                     fontWeight = FontWeight.Black,
                                     fontSize = 26.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    letterSpacing = (-1).sp,
+                                    fontFamily = ShootingStarFontFamily,
+                                    letterSpacing = 0.5.sp,
                                     color = colors.textPrimary
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))

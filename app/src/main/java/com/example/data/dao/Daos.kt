@@ -9,6 +9,7 @@ import androidx.room.Update
 import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
 import com.example.data.model.UserConversationStateEntity
+import com.example.data.model.UserDeviceEntity
 import com.example.data.model.UserEntity
 import com.example.data.model.mergeMessageStatus
 import com.example.data.model.normalizeUsername
@@ -166,6 +167,18 @@ interface UserDao {
         """
     )
     suspend fun recordPeerActivity(userId: String, activityTimestamp: Long, now: Long = System.currentTimeMillis())
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertUserDevice(device: UserDeviceEntity)
+
+    @Query("SELECT * FROM user_devices WHERE userId = :userId ORDER BY updatedAt DESC")
+    suspend fun getDevicesForUserDirect(userId: String): List<UserDeviceEntity>
+
+    @Query("DELETE FROM user_devices WHERE userId = :userId AND deviceId = :deviceId")
+    suspend fun deleteUserDevice(userId: String, deviceId: String)
+
+    @Query("DELETE FROM user_devices WHERE fcmToken = :fcmToken")
+    suspend fun deleteDeviceByToken(fcmToken: String)
 }
 
 @Dao
@@ -317,4 +330,16 @@ interface MessageDao {
         """
     )
     suspend fun getUnreadCount(conversationId: String, recipientId: String): Int
+
+    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY timestamp ASC, id ASC")
+    suspend fun getMessagesForConversationDirect(conversationId: String): List<MessageEntity>
+
+    @Query("SELECT * FROM messages WHERE recipientId = :recipientId ORDER BY timestamp ASC, id ASC")
+    suspend fun getMessagesForRecipientDirect(recipientId: String): List<MessageEntity>
+
+    @Query("SELECT * FROM messages WHERE recipientId = :recipientId AND status != 'READ' ORDER BY timestamp ASC, id ASC")
+    suspend fun getUnreadMessagesForRecipient(recipientId: String): List<MessageEntity>
+
+    @Query("SELECT * FROM messages WHERE senderId = :senderId AND (status = 'SENDING' OR status = 'FAILED') ORDER BY timestamp ASC, id ASC")
+    suspend fun getPendingOutgoingMessages(senderId: String): List<MessageEntity>
 }

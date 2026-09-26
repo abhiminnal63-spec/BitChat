@@ -58,6 +58,7 @@ import com.example.ui.theme.BrutalistTheme
 import com.example.ui.theme.EasappAccent
 import com.example.ui.theme.EasappSecondary
 import com.example.ui.theme.SharpCorner
+import com.example.ui.theme.ShootingStarFontFamily
 
 @Composable
 fun AuthScreen(
@@ -101,11 +102,11 @@ fun AuthScreen(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
-                                text = "EASAPP",
+                                text = "BITCHAT",
                                 fontWeight = FontWeight.Black,
                                 fontSize = 32.sp,
-                                fontFamily = FontFamily.Monospace,
-                                letterSpacing = (-1).sp,
+                                fontFamily = ShootingStarFontFamily,
+                                letterSpacing = 0.5.sp,
                                 color = colors.accentOn
                             )
                         }

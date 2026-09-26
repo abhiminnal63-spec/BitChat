@@ -372,7 +372,7 @@ object ImageUtils {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
 
-            val chooser = Intent.createChooser(shareIntent, "Share Image via Easapp").apply {
+            val chooser = Intent.createChooser(shareIntent, "Share Image via BITCHAT").apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(chooser)
@@ -381,10 +381,10 @@ object ImageUtils {
             // Fallback to text share if image extraction fails
             val textIntent = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
-                putExtra(Intent.EXTRA_TEXT, caption.ifBlank { "Shared from Easapp" })
+                putExtra(Intent.EXTRA_TEXT, caption.ifBlank { "Shared from BITCHAT" })
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(Intent.createChooser(textIntent, "Share via Easapp").apply {
+            context.startActivity(Intent.createChooser(textIntent, "Share via BITCHAT").apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             })
         }

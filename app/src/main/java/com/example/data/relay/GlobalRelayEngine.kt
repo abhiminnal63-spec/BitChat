@@ -779,6 +779,26 @@ class GlobalRelayEngine(
                             }
                         }
                     }
+                    "NEW_MESSAGE" -> {
+                        json.optJSONObject("senderProfile")?.let { parseUserFromJsonObject(it) }?.let { parsed ->
+                            val prev = discoveredById[parsed.id]
+                            discoveredById[parsed.id] = mergeUserPreservingNewestPresence(prev, parsed)
+                        }
+                        json.optJSONObject("receiverProfile")?.let { parseUserFromJsonObject(it) }?.let { parsed ->
+                            val prev = discoveredById[parsed.id]
+                            discoveredById[parsed.id] = mergeUserPreservingNewestPresence(prev, parsed)
+                        }
+                    }
+                    "CONVERSATION_SYNC" -> {
+                        json.optJSONObject("participant1Profile")?.let { parseUserFromJsonObject(it) }?.let { parsed ->
+                            val prev = discoveredById[parsed.id]
+                            discoveredById[parsed.id] = mergeUserPreservingNewestPresence(prev, parsed)
+                        }
+                        json.optJSONObject("participant2Profile")?.let { parseUserFromJsonObject(it) }?.let { parsed ->
+                            val prev = discoveredById[parsed.id]
+                            discoveredById[parsed.id] = mergeUserPreservingNewestPresence(prev, parsed)
+                        }
+                    }
                 }
             } catch (_: Exception) {
             }
@@ -936,6 +956,34 @@ class GlobalRelayEngine(
 
         val matched = cloudUsersCache.values.firstOrNull { it.usernameNormalized == norm }
         Result.success(matched)
+    }
+
+    suspend fun fetchUserByIdFromCloud(userId: String): Result<UserEntity?> = withContext(Dispatchers.IO) {
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return@withContext Result.success(null)
+
+        cloudUsersCache[cleanUid]?.let { return@withContext Result.success(it) }
+
+        try {
+            val userPayloads = fetchTopicPayloadsFromCloud("$baseTopic-user-$cleanUid", forceFullHistory = true)
+            applyUserPayloadsToCache(userPayloads)
+            cloudUsersCache[cleanUid]?.let { user ->
+                userDao.upsertRemoteUser(user, allowPresenceUpdate = true)
+                return@withContext Result.success(user)
+            }
+        } catch (e: Exception) {
+            Log.w(tag, "Failed to fetch user inbox payloads for $cleanUid: ${e.message}")
+        }
+
+        val syncRes = syncUsersFromCloud("")
+        if (syncRes.isSuccess) {
+            val user = cloudUsersCache[cleanUid]
+            if (user != null) {
+                userDao.upsertRemoteUser(user, allowPresenceUpdate = true)
+            }
+            return@withContext Result.success(user)
+        }
+        Result.success(cloudUsersCache[cleanUid])
     }
 
     /**
@@ -1156,9 +1204,17 @@ class GlobalRelayEngine(
                     false
                 }
             }
+            val userDef = async {
+                if (user.id.isNotBlank()) {
+                    postPayloadDirect("$baseTopic-user-${user.id}", payload, maxRetries = 1)
+                } else {
+                    false
+                }
+            }
             val globalOk = globalDef.await()
             val unameOk = unameDef.await()
-            if (!globalOk && !unameOk && RealtimeManager.isNetworkConnected.value) {
+            val userOk = userDef.await()
+            if (!globalOk && !unameOk && !userOk && RealtimeManager.isNetworkConnected.value) {
                 // Queue background retry if relay was temporarily rate-limited or unreachable
                 scope.launch {
                     delay(1500L)
@@ -1166,10 +1222,13 @@ class GlobalRelayEngine(
                     if (normUser.isNotBlank()) {
                         postPayloadDirect("$baseTopic-uname-$normUser", payload, maxRetries = 2)
                     }
+                    if (user.id.isNotBlank()) {
+                        postPayloadDirect("$baseTopic-user-${user.id}", payload, maxRetries = 2)
+                    }
                 }
                 return@coroutineScope true
             }
-            globalOk || unameOk
+            globalOk || unameOk || userOk
         }
     }
 
@@ -1191,6 +1250,9 @@ class GlobalRelayEngine(
         postPayload("$baseTopic-users", payload)
         if (normUser.isNotBlank()) {
             postPayload("$baseTopic-uname-$normUser", payload)
+        }
+        if (user.id.isNotBlank()) {
+            postPayload("$baseTopic-user-${user.id}", payload)
         }
     }
 
@@ -1214,6 +1276,7 @@ class GlobalRelayEngine(
             put("lastSeenTimestamp", lastSeenTimestamp)
         }
         postPayload("$baseTopic-users", payload, cacheHeader = cacheInHistory)
+        postPayload("$baseTopic-user-$userId", payload, cacheHeader = cacheInHistory)
     }
 
     fun syncConversationToCloud(

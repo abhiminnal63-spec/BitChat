@@ -44,6 +44,7 @@ class FirestoreSyncManager(
     private val listeners = mutableListOf<ListenerRegistration>()
     private val messageListeners = mutableMapOf<String, ListenerRegistration>()
     private val typingListeners = mutableMapOf<String, ListenerRegistration>()
+    private val profileListeners = java.util.concurrent.ConcurrentHashMap<String, ListenerRegistration>()
     private val broadcastedMessageStatuses = java.util.concurrent.ConcurrentHashMap<String, String>()
     private var globalUsersListener: ListenerRegistration? = null
 
@@ -523,6 +524,47 @@ class FirestoreSyncManager(
         }
     }
 
+    suspend fun fetchUserByIdFromCloud(userId: String): Result<UserEntity?> = withContext(Dispatchers.IO) {
+        val db = firestore ?: return@withContext Result.success(null)
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return@withContext Result.success(null)
+        try {
+            val doc = db.collection("users").document(cleanUid).get().await()
+            if (doc.exists()) {
+                val user = parseAndUpsertUserDoc(doc)
+                listenToUserProfile(cleanUid)
+                Result.success(user)
+            } else {
+                Result.success(null)
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Firestore fetchUserById error for $cleanUid: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    fun listenToUserProfile(userId: String) {
+        val db = firestore ?: return
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank() || profileListeners.containsKey(cleanUid)) return
+        try {
+            val reg = db.collection("users").document(cleanUid).addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    Log.e(tag, "Profile listener error for $cleanUid: ${error.message}")
+                    return@addSnapshotListener
+                }
+                if (snapshot != null && snapshot.exists()) {
+                    scope.launch {
+                        parseAndUpsertUserDoc(snapshot)
+                    }
+                }
+            }
+            profileListeners[cleanUid] = reg
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to listen to user profile $cleanUid: ${e.message}")
+        }
+    }
+
     suspend fun updatePresenceInCloud(userId: String, isOnline: Boolean, lastSeenTimestamp: Long) = withContext(Dispatchers.IO) {
         val db = firestore ?: return@withContext
         try {
@@ -710,5 +752,9 @@ class FirestoreSyncManager(
             listener.remove()
         }
         typingListeners.clear()
+        for ((_, listener) in profileListeners) {
+            listener.remove()
+        }
+        profileListeners.clear()
     }
 }

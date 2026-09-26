@@ -1,5 +1,5 @@
 {
-  "name": "Easapp",
+  "name": "BITCHAT",
   "description": "Mobile brutalist real-time messaging application with bold typography, tactile controls, and real-time delivery.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

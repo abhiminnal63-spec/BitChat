@@ -86,7 +86,7 @@ fun ProfileScreen(
     }
 
     val colors = BrutalistTheme.colors
-    val avatarOptions = listOf("ALICE", "BOB", "CYBER", "NEON", "MATRIX", "EASAPP")
+    val avatarOptions = listOf("ALICE", "BOB", "CYBER", "NEON", "MATRIX", "BITCHAT")
     val deviceTimeStr = SimpleDateFormat("h:mm a (z)", Locale.getDefault()).format(Date())
 
     Box(

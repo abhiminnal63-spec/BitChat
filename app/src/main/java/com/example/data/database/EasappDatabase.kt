@@ -12,6 +12,7 @@ import com.example.data.dao.UserDao
 import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
 import com.example.data.model.UserConversationStateEntity
+import com.example.data.model.UserDeviceEntity
 import com.example.data.model.UserEntity
 
 @Database(
@@ -19,9 +20,10 @@ import com.example.data.model.UserEntity
         UserEntity::class,
         ConversationEntity::class,
         MessageEntity::class,
-        UserConversationStateEntity::class
+        UserConversationStateEntity::class,
+        UserDeviceEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class EasappDatabase : RoomDatabase() {
@@ -72,6 +74,25 @@ abstract class EasappDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `user_devices` (
+                        `userId` TEXT NOT NULL,
+                        `deviceId` TEXT NOT NULL,
+                        `fcmToken` TEXT NOT NULL,
+                        `platform` TEXT NOT NULL DEFAULT 'android',
+                        `updatedAt` INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(`userId`, `deviceId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_user_devices_userId` ON `user_devices` (`userId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_user_devices_fcmToken` ON `user_devices` (`fcmToken`)")
+            }
+        }
+
         fun getInstance(context: Context): EasappDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -80,7 +101,7 @@ abstract class EasappDatabase : RoomDatabase() {
                     "easapp_database.db"
                 )
                     .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

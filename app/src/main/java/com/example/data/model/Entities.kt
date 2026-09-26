@@ -30,10 +30,26 @@ data class UserEntity(
     val displayName: String,
     val passwordHash: String = "",
     val avatarSeed: String = "BRUTAL_1",
-    val statusMessage: String = "Using Easapp",
+    val statusMessage: String = "Using BITCHAT",
     val isOnline: Boolean = false,
     val lastSeenTimestamp: Long = System.currentTimeMillis(),
     val createdAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "user_devices",
+    primaryKeys = ["userId", "deviceId"],
+    indices = [
+        Index(value = ["userId"]),
+        Index(value = ["fcmToken"])
+    ]
+)
+data class UserDeviceEntity(
+    val userId: String,
+    val deviceId: String,
+    val fcmToken: String,
+    val platform: String = "android",
+    val updatedAt: Long = System.currentTimeMillis()
 )
 
 @Entity(

@@ -612,6 +612,64 @@ class UserRepository(
         userDao.getUserByIdDirect(id)
     }
 
+    /**
+     * Resolves the user's real profile directly from the shared backend (Firestore + GlobalRelayEngine)
+     * using their authenticated backend UID and updates the local database.
+     */
+    suspend fun fetchAndCacheUserById(userId: String): Result<UserEntity?> = withContext(Dispatchers.IO) {
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return@withContext Result.success(null)
+
+        val localUser = userDao.getUserByIdDirect(cleanUid)
+
+        val (firestoreUser, relayUser) = coroutineScope {
+            val fsDeferred = async {
+                try {
+                    firestoreSyncManager?.fetchUserByIdFromCloud(cleanUid)?.getOrNull()
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            val relayDeferred = async {
+                try {
+                    relayEngine?.fetchUserByIdFromCloud(cleanUid)?.getOrNull()
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            fsDeferred.await() to relayDeferred.await()
+        }
+
+        val resolvedCloudUser = relayUser ?: firestoreUser
+        if (resolvedCloudUser != null) {
+            val merged = if (localUser != null) {
+                localUser.copy(
+                    username = resolvedCloudUser.username.ifBlank { localUser.username },
+                    usernameNormalized = resolvedCloudUser.usernameNormalized.ifBlank { localUser.usernameNormalized },
+                    displayName = resolvedCloudUser.displayName.ifBlank { localUser.displayName },
+                    avatarSeed = resolvedCloudUser.avatarSeed.ifBlank { localUser.avatarSeed },
+                    statusMessage = resolvedCloudUser.statusMessage.ifBlank { localUser.statusMessage },
+                    isOnline = resolvedCloudUser.isOnline,
+                    lastSeenTimestamp = maxOf(localUser.lastSeenTimestamp, resolvedCloudUser.lastSeenTimestamp)
+                )
+            } else {
+                resolvedCloudUser
+            }
+            userDao.upsertRemoteUser(merged, allowPresenceUpdate = true)
+            return@withContext Result.success(merged)
+        }
+
+        if (localUser != null && localUser.displayName.isNotBlank()) {
+            return@withContext Result.success(localUser)
+        }
+
+        if (!RealtimeManager.isNetworkConnected.value) {
+            return@withContext Result.failure(IOException("Offline: profile unavailable"))
+        }
+
+        Result.success(localUser)
+    }
+
     private fun computeAuthVerifier(usernameNormalized: String, rawPassword: String): String {
         val input = "easapp_auth_verifier_v1:$usernameNormalized:$rawPassword"
         val bytes = MessageDigest.getInstance("SHA-256").digest(input.toByteArray())
