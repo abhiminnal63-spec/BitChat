@@ -57,6 +57,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -72,7 +74,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import coil.compose.AsyncImage
 import com.example.data.model.MessageEntity
 import com.example.data.model.MessageStatus
 import com.example.ui.theme.BrutalistAvatar
@@ -83,12 +84,17 @@ import com.example.ui.theme.BrutalistTheme
 import com.example.ui.theme.BrutalistTypingIndicator
 import com.example.ui.theme.BrutalistWhite
 import com.example.ui.theme.EasappAccent
+import com.example.ui.theme.EasappMediaImage
 import com.example.ui.theme.EasappOnlineGreen
 import com.example.ui.theme.EasappReadBlue
 import com.example.ui.theme.EasappSecondary
 import com.example.ui.theme.SharpCorner
 import com.example.util.DateTimeUtils
 import com.example.util.ImageUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -100,6 +106,7 @@ fun ChatScreen(
     onSwitchedToOtherUser: (newConvId: String, newOtherUserId: String) -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val colors = BrutalistTheme.colors
     val myId by viewModel.currentUserId.collectAsState()
     val otherUser by viewModel.otherUser.collectAsState()
@@ -109,19 +116,29 @@ fun ChatScreen(
     val isOtherTyping by viewModel.isOtherUserTyping.collectAsState()
     val listState = rememberLazyListState()
 
+    val nowTick by produceState(initialValue = System.currentTimeMillis()) {
+        while (true) {
+            delay(15_000L)
+            value = System.currentTimeMillis()
+        }
+    }
+
     // Activity Result Launcher for Photo Picker (Android PickVisualMedia)
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            // Compress and convert to Base64 for cross-device Firestore and Room sync
-            val encodedImage = ImageUtils.compressAndEncodeImage(context, uri) ?: uri.toString()
-            viewModel.setAttachment(
-                uri = encodedImage,
-                name = "photo_${System.currentTimeMillis()}.jpg",
-                size = 1024L * 80L,
-                type = "IMAGE"
-            )
+            scope.launch {
+                val encodedImage = withContext(Dispatchers.IO) {
+                    ImageUtils.compressAndEncodeImage(context, uri)
+                } ?: uri.toString()
+                viewModel.setAttachment(
+                    uri = encodedImage,
+                    name = "photo_${System.currentTimeMillis()}.jpg",
+                    size = encodedImage.length.toLong(),
+                    type = "image"
+                )
+            }
         }
     }
 
@@ -184,11 +201,17 @@ fun ChatScreen(
                         )
                     }
 
+                    val peerEffectiveOnline = DateTimeUtils.isEffectivelyOnline(
+                        isOnline = otherUser?.isOnline == true,
+                        lastSeenTimestamp = otherUser?.lastSeenTimestamp ?: 0L,
+                        now = nowTick
+                    )
+
                     // Recipient Avatar
                     BrutalistAvatar(
                         seedOrName = otherUser?.displayName ?: "USER",
                         size = 38.dp,
-                        isOnline = otherUser?.isOnline == true
+                        isOnline = peerEffectiveOnline
                     )
 
                     Spacer(modifier = Modifier.width(10.dp))
@@ -246,17 +269,17 @@ fun ChatScreen(
                                 }
                             } else {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    val isOnline = otherUser?.isOnline == true
                                     val lastSeenText = DateTimeUtils.formatLastSeen(
-                                        isOnline = isOnline,
-                                        lastSeenTimestamp = otherUser?.lastSeenTimestamp ?: 0L
+                                        isOnline = peerEffectiveOnline,
+                                        lastSeenTimestamp = otherUser?.lastSeenTimestamp ?: 0L,
+                                        now = nowTick
                                     )
                                     Text(
                                         text = "• $lastSeenText",
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold,
                                         fontFamily = FontFamily.Monospace,
-                                        color = if (isOnline) EasappOnlineGreen else colors.textSecondary
+                                        color = if (peerEffectiveOnline) EasappOnlineGreen else colors.textSecondary
                                     )
                                 }
                             }
@@ -369,6 +392,9 @@ fun ChatScreen(
                                 },
                                 onShareImage = { uri ->
                                     ImageUtils.shareImage(context, uri, "Shared via Easapp")
+                                },
+                                onRetryMessage = { msgId ->
+                                    viewModel.retryMessage(msgId)
                                 },
                                 modifier = Modifier.animateItem()
                             )
@@ -571,7 +597,7 @@ fun ChatScreen(
                             }
                         }
                         Spacer(modifier = Modifier.height(8.dp))
-                        AsyncImage(
+                        EasappMediaImage(
                             model = uiState.previewImageUri,
                             contentDescription = "Full preview",
                             modifier = Modifier

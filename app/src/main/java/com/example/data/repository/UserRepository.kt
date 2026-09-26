@@ -14,14 +14,17 @@ import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -46,6 +49,8 @@ class UserRepository(
     private val _localSessionVerifiers = MutableStateFlow<Map<String, String>>(loadLocalSessionVerifiers())
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var heartbeatJob: Job? = null
+    private val isAppInForeground = MutableStateFlow(true)
 
     init {
         RealtimeManager.initNetworkMonitoring(context.applicationContext)
@@ -83,14 +88,64 @@ class UserRepository(
                     firestoreSyncManager?.startSync(storedId)
 
                     relayEngine?.start(storedId)
-                    relayEngine?.broadcastPresence(storedId, true, now)
+                    relayEngine?.broadcastPresence(storedId, true, now, cacheInHistory = true)
                     relayEngine?.broadcastUser(activeUser, isNew = false, authVerifier = storedVerifier)
+                    startPresenceHeartbeat()
                 } else {
                     _currentUserId.value = null
                     prefs.edit()
                         .remove("logged_in_user_id")
                         .remove("logged_in_user_profile_json")
                         .apply()
+                }
+            }
+        }
+    }
+
+    fun onAppForegrounded() {
+        isAppInForeground.value = true
+        val uid = _currentUserId.value ?: return
+        scope.launch {
+            val now = System.currentTimeMillis()
+            userDao.updateOnlineStatus(uid, true, now)
+            _currentUser.value = _currentUser.value?.copy(isOnline = true, lastSeenTimestamp = now)
+            firestoreSyncManager?.updatePresenceInCloud(uid, true, now)
+            relayEngine?.start(uid)
+            relayEngine?.broadcastPresence(uid, true, now, cacheInHistory = true)
+        }
+        startPresenceHeartbeat()
+    }
+
+    fun onAppBackgrounded() {
+        isAppInForeground.value = false
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+        val uid = _currentUserId.value ?: return
+        scope.launch {
+            val now = System.currentTimeMillis()
+            userDao.updateOnlineStatus(uid, false, now)
+            _currentUser.value = _currentUser.value?.copy(isOnline = false, lastSeenTimestamp = now)
+            firestoreSyncManager?.updatePresenceInCloud(uid, false, now)
+            relayEngine?.broadcastPresence(uid, false, now, cacheInHistory = true)
+        }
+    }
+
+    private fun startPresenceHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = scope.launch {
+            var tick = 0
+            while (isActive && isAppInForeground.value) {
+                delay(25_000L)
+                if (!isAppInForeground.value) break
+                val uid = _currentUserId.value ?: break
+                if (RealtimeManager.isNetworkConnected.value) {
+                    val now = System.currentTimeMillis()
+                    userDao.updateOnlineStatus(uid, true, now)
+                    _currentUser.value = _currentUser.value?.copy(isOnline = true, lastSeenTimestamp = now)
+                    firestoreSyncManager?.updatePresenceInCloud(uid, true, now)
+                    // Cache every 3rd heartbeat in ntfy history, stream all others live with Cache: no
+                    relayEngine?.broadcastPresence(uid, true, now, cacheInHistory = (tick % 3 == 0))
+                    tick++
                 }
             }
         }
@@ -359,11 +414,13 @@ class UserRepository(
     }
 
     suspend fun logout() = withContext(Dispatchers.IO) {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
         val now = System.currentTimeMillis()
         _currentUserId.value?.let { id ->
             userDao.updateOnlineStatus(id, false, now)
             firestoreSyncManager?.updatePresenceInCloud(id, false, now)
-            relayEngine?.broadcastPresence(id, false, now)
+            relayEngine?.broadcastPresence(id, false, now, cacheInHistory = true)
         }
         firestoreSyncManager?.stopSync()
         relayEngine?.stop()
@@ -380,6 +437,7 @@ class UserRepository(
         _currentUserId.value = user.id
         _currentUser.value = user
         saveLocalAuthenticatedSession(user, authVerifier)
+        startPresenceHeartbeat()
     }
 
     suspend fun updateProfile(displayName: String, statusMessage: String, avatarSeed: String): Result<UserEntity> = withContext(Dispatchers.IO) {

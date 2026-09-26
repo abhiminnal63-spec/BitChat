@@ -19,7 +19,7 @@ import com.example.data.model.UserEntity
         ConversationEntity::class,
         MessageEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class EasappDatabase : RoomDatabase() {
@@ -40,6 +40,14 @@ abstract class EasappDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'")
+                db.execSQL("ALTER TABLE messages ADD COLUMN mediaUrl TEXT")
+                db.execSQL("UPDATE messages SET type = 'image', mediaUrl = attachmentUri WHERE attachmentUri IS NOT NULL AND attachmentUri != ''")
+            }
+        }
+
         fun getInstance(context: Context): EasappDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -47,7 +55,7 @@ abstract class EasappDatabase : RoomDatabase() {
                     EasappDatabase::class.java,
                     "easapp_database.db"
                 )
-                    .addMigrations(MIGRATION_2_3)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

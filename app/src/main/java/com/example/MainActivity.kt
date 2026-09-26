@@ -41,6 +41,18 @@ import com.example.util.ThemeManager
 
 class MainActivity : ComponentActivity() {
 
+    private var userRepositoryRef: UserRepository? = null
+
+    override fun onStart() {
+        super.onStart()
+        userRepositoryRef?.onAppForegrounded()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        userRepositoryRef?.onAppBackgrounded()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -63,12 +75,15 @@ class MainActivity : ComponentActivity() {
             firestoreSyncManager = firestoreSyncManager,
             relayEngine = globalRelayEngine
         )
+        userRepositoryRef = userRepository
+
         val chatRepository = ChatRepository(
             conversationDao = database.conversationDao(),
             messageDao = database.messageDao(),
             userDao = database.userDao(),
             firestoreSyncManager = firestoreSyncManager,
-            relayEngine = globalRelayEngine
+            relayEngine = globalRelayEngine,
+            appContext = applicationContext
         )
         val themeManager = ThemeManager(applicationContext)
 

@@ -60,7 +60,34 @@ enum class MessageStatus {
     SENDING,
     SENT,
     DELIVERED,
-    READ
+    READ,
+    FAILED
+}
+
+fun messageStatusRank(status: String): Int = when (status.uppercase()) {
+    MessageStatus.FAILED.name -> -1
+    MessageStatus.SENDING.name -> 0
+    MessageStatus.SENT.name -> 1
+    MessageStatus.DELIVERED.name -> 2
+    MessageStatus.READ.name -> 3
+    else -> 0
+}
+
+fun mergeMessageStatus(existingStatus: String, incomingStatus: String): String {
+    val existingUpper = existingStatus.uppercase()
+    val incomingUpper = incomingStatus.uppercase()
+    // Explicit transition between SENDING and FAILED
+    if (existingUpper == MessageStatus.SENDING.name && incomingUpper == MessageStatus.FAILED.name) {
+        return MessageStatus.FAILED.name
+    }
+    if (existingUpper == MessageStatus.FAILED.name && incomingUpper == MessageStatus.SENDING.name) {
+        return MessageStatus.SENDING.name
+    }
+    return if (messageStatusRank(incomingUpper) >= messageStatusRank(existingUpper)) {
+        incomingUpper
+    } else {
+        existingUpper
+    }
 }
 
 @Entity(
@@ -79,9 +106,16 @@ data class MessageEntity(
     val recipientId: String,
     val content: String,
     val timestamp: Long = System.currentTimeMillis(),
-    val status: String = MessageStatus.SENT.name,
+    val status: String = MessageStatus.SENDING.name,
     val attachmentUri: String? = null,
     val attachmentType: String? = null,
     val attachmentSize: Long? = null,
-    val attachmentName: String? = null
-)
+    val attachmentName: String? = null,
+    val type: String = if (!attachmentUri.isNullOrBlank()) "image" else "text",
+    val mediaUrl: String? = attachmentUri
+) {
+    val messageId: String get() = id
+    val receiverId: String get() = recipientId
+    val text: String get() = content
+    val createdAt: Long get() = timestamp
+}

@@ -42,7 +42,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
 import com.example.data.model.MessageEntity
 import com.example.data.model.MessageStatus
 import com.example.ui.theme.BrutalistBlack
@@ -50,11 +49,11 @@ import com.example.ui.theme.BrutalistCard
 import com.example.ui.theme.BrutalistTheme
 import com.example.ui.theme.BrutalistWhite
 import com.example.ui.theme.EasappAccent
+import com.example.ui.theme.EasappMediaImage
 import com.example.ui.theme.EasappSecondary
 import com.example.ui.theme.MessageStatusIndicator
 import com.example.ui.theme.SharpCorner
 import com.example.util.DateTimeUtils
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -64,42 +63,40 @@ fun MessageBubbleItem(
     isOutgoing: Boolean,
     onImageClick: (uri: String) -> Unit,
     onShareImage: (uri: String) -> Unit,
+    onRetryMessage: (messageId: String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val colors = BrutalistTheme.colors
     val alignment = if (isOutgoing) Alignment.CenterEnd else Alignment.CenterStart
+    val isFailed = isOutgoing && message.status.equals(MessageStatus.FAILED.name, ignoreCase = true)
     val bgColor = if (isOutgoing) colors.accent else colors.cardBackground
     val textColor = if (isOutgoing) colors.accentOn else colors.textPrimary
     val timeColor = if (isOutgoing) colors.accentOn.copy(alpha = 0.7f) else colors.textSecondary
     val timeStr = DateTimeUtils.formatMessageTimestamp(message.timestamp)
+    val resolvedMediaUri = remember(message.mediaUrl, message.attachmentUri) {
+        val mUrl = message.mediaUrl?.trim() ?: ""
+        val aUri = message.attachmentUri?.trim() ?: ""
+        mUrl.ifBlank { aUri }
+    }
+    val fallbackMediaUri = remember(message.mediaUrl, message.attachmentUri) {
+        val aUri = message.attachmentUri?.trim() ?: ""
+        aUri.ifBlank { null }
+    }
+    val hasImageMedia = resolvedMediaUri.isNotBlank() || message.type.equals("image", ignoreCase = true)
 
     val isNewlyDispatched = remember(message.id) {
-        abs(System.currentTimeMillis() - message.timestamp) < 2500L
-    }
-    var displayedStatus by remember(message.id) {
-        mutableStateOf(
-            if (isNewlyDispatched && isOutgoing) MessageStatus.SENDING.name else message.status
-        )
+        abs(System.currentTimeMillis() - message.timestamp) < 2000L
     }
     val animAlpha = remember(message.id) { Animatable(if (isNewlyDispatched) 0f else 1f) }
-    val animOffsetY = remember(message.id) { Animatable(if (isNewlyDispatched) 28f else 0f) }
-    val animScale = remember(message.id) { Animatable(if (isNewlyDispatched) 0.92f else 1f) }
-
-    LaunchedEffect(message.id, message.status) {
-        if (isNewlyDispatched && isOutgoing && displayedStatus == MessageStatus.SENDING.name && message.status != MessageStatus.SENDING.name) {
-            delay(220L)
-            displayedStatus = message.status
-        } else {
-            displayedStatus = message.status
-        }
-    }
+    val animOffsetY = remember(message.id) { Animatable(if (isNewlyDispatched) 24f else 0f) }
+    val animScale = remember(message.id) { Animatable(if (isNewlyDispatched) 0.94f else 1f) }
 
     LaunchedEffect(message.id) {
         if (isNewlyDispatched) {
             launch {
                 animAlpha.animateTo(
                     targetValue = 1f,
-                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                    animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)
                 )
             }
             launch {
@@ -138,27 +135,33 @@ fun MessageBubbleItem(
         BrutalistCard(
             modifier = Modifier.widthIn(min = 100.dp, max = 290.dp),
             backgroundColor = bgColor,
-            borderColor = colors.border,
+            borderColor = if (isFailed) EasappSecondary else colors.border,
             shadowOffset = 2.dp,
+            onClick = if (isFailed) {
+                { onRetryMessage(message.id) }
+            } else null,
             testTag = if (isOutgoing) "outgoing_message_${message.id}" else "incoming_message_${message.id}"
         ) {
             Column(
                 modifier = Modifier.padding(10.dp)
             ) {
-                // If attachment is present
-                if (!message.attachmentUri.isNullOrBlank()) {
+                // If image media is present
+                if (hasImageMedia && resolvedMediaUri.isNotBlank()) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(180.dp)
-                            .background(BrutalistBlack, SharpCorner)
+                            .height(185.dp)
+                            .background(colors.inputBackground, SharpCorner)
                             .border(1.5.dp, colors.border, SharpCorner)
-                            .clickable { onImageClick(message.attachmentUri) }
+                            .clickable { onImageClick(resolvedMediaUri) }
                     ) {
-                        AsyncImage(
-                            model = message.attachmentUri,
+                        EasappMediaImage(
+                            model = resolvedMediaUri,
+                            fallbackModel = fallbackMediaUri,
                             contentDescription = "Attachment",
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(185.dp),
                             contentScale = ContentScale.Crop
                         )
                         Row(
@@ -182,7 +185,7 @@ fun MessageBubbleItem(
                                 tint = EasappAccent,
                                 modifier = Modifier
                                     .size(12.dp)
-                                    .clickable { onShareImage(message.attachmentUri) }
+                                    .clickable { onShareImage(resolvedMediaUri) }
                             )
                         }
                     }
@@ -207,7 +210,13 @@ fun MessageBubbleItem(
 
                 // Footer: Timestamp + Status Indicators
                 Row(
-                    modifier = Modifier.align(Alignment.End),
+                    modifier = Modifier
+                        .align(Alignment.End)
+                        .then(
+                            if (isFailed) {
+                                Modifier.clickable { onRetryMessage(message.id) }
+                            } else Modifier
+                        ),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
@@ -220,7 +229,7 @@ fun MessageBubbleItem(
                     if (isOutgoing) {
                         Spacer(modifier = Modifier.width(6.dp))
                         MessageStatusIndicator(
-                            status = displayedStatus,
+                            status = message.status,
                             showLabel = true
                         )
                     }
@@ -277,14 +286,15 @@ fun AttachmentDraftPreview(
             Box(
                 modifier = Modifier
                     .size(44.dp)
-                    .background(BrutalistBlack, SharpCorner)
+                    .background(colors.inputBackground, SharpCorner)
                     .border(1.dp, colors.border, SharpCorner)
             ) {
-                AsyncImage(
+                EasappMediaImage(
                     model = uri,
                     contentDescription = "Draft attachment",
-                    modifier = Modifier.fillMaxWidth(),
-                    contentScale = ContentScale.Crop
+                    modifier = Modifier.size(44.dp),
+                    contentScale = ContentScale.Crop,
+                    showLoadingOverlay = false
                 )
             }
             Spacer(modifier = Modifier.width(8.dp))

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.dao.UserDao
 import com.example.data.model.MessageEntity
+import com.example.data.model.MessageStatus
 import com.example.data.model.UserEntity
 import com.example.data.realtime.RealtimeManager
 import com.example.data.repository.ChatRepository
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class ChatUiState(
@@ -63,6 +65,18 @@ class ChatViewModel(
 
     init {
         onEnterScreen()
+        // Automatically mark incoming messages as READ while the conversation is open
+        viewModelScope.launch {
+            messages.collect { list ->
+                val myId = currentUserId.value ?: return@collect
+                val hasUnreadIncoming = list.any {
+                    it.recipientId == myId && it.status != MessageStatus.READ.name
+                }
+                if (hasUnreadIncoming) {
+                    chatRepository.markConversationAsRead(conversationId, myId)
+                }
+            }
+        }
     }
 
     fun onEnterScreen() {
@@ -84,7 +98,7 @@ class ChatViewModel(
     }
 
     fun onTextInputChange(text: String) {
-        _uiState.value = _uiState.value.copy(textInput = text)
+        _uiState.update { it.copy(textInput = text) }
         val myId = currentUserId.value ?: return
         typingDebounceJob?.cancel()
         if (text.isNotBlank()) {
@@ -104,56 +118,53 @@ class ChatViewModel(
     }
 
     fun toggleEmojiPicker() {
-        _uiState.value = _uiState.value.copy(isEmojiPickerOpen = !_uiState.value.isEmojiPickerOpen)
+        _uiState.update { it.copy(isEmojiPickerOpen = !it.isEmojiPickerOpen) }
     }
 
-    fun setAttachment(uri: String?, name: String?, size: Long?, type: String? = "IMAGE") {
-        _uiState.value = _uiState.value.copy(
-            selectedAttachmentUri = uri,
-            selectedAttachmentName = name,
-            selectedAttachmentSize = size,
-            selectedAttachmentType = type
-        )
+    fun setAttachment(uri: String?, name: String?, size: Long?, type: String? = "image") {
+        _uiState.update {
+            it.copy(
+                selectedAttachmentUri = uri,
+                selectedAttachmentName = name,
+                selectedAttachmentSize = size,
+                selectedAttachmentType = type
+            )
+        }
     }
 
     fun clearAttachment() {
-        _uiState.value = _uiState.value.copy(
-            selectedAttachmentUri = null,
-            selectedAttachmentName = null,
-            selectedAttachmentSize = null,
-            selectedAttachmentType = null
-        )
+        _uiState.update {
+            it.copy(
+                selectedAttachmentUri = null,
+                selectedAttachmentName = null,
+                selectedAttachmentSize = null,
+                selectedAttachmentType = null
+            )
+        }
     }
 
     fun setPreviewImage(uri: String?) {
-        _uiState.value = _uiState.value.copy(previewImageUri = uri)
+        _uiState.update { it.copy(previewImageUri = uri) }
     }
 
     fun sendMessage() {
         val myId = currentUserId.value ?: return
         val state = _uiState.value
         val text = state.textInput.trim()
-        val hasAttachment = state.selectedAttachmentUri != null
+        val attachmentUri = state.selectedAttachmentUri
+        val attachmentType = state.selectedAttachmentType
+        val attachmentSize = state.selectedAttachmentSize
+        val attachmentName = state.selectedAttachmentName
+        val hasAttachment = !attachmentUri.isNullOrBlank()
 
         if (text.isBlank() && !hasAttachment) return
 
         typingDebounceJob?.cancel()
         typingDebounceJob = null
 
-        viewModelScope.launch {
-            chatRepository.sendMessage(
-                conversationId = conversationId,
-                senderId = myId,
-                recipientId = otherUserId,
-                content = text,
-                attachmentUri = state.selectedAttachmentUri,
-                attachmentType = state.selectedAttachmentType,
-                attachmentSize = state.selectedAttachmentSize,
-                attachmentName = state.selectedAttachmentName
-            )
-
-            // Clear composer state
-            _uiState.value = _uiState.value.copy(
+        // Clear composer state immediately using functional update so rapid consecutive messages never collide
+        _uiState.update {
+            it.copy(
                 textInput = "",
                 selectedAttachmentUri = null,
                 selectedAttachmentName = null,
@@ -161,6 +172,25 @@ class ChatViewModel(
                 selectedAttachmentType = null,
                 isEmojiPickerOpen = false
             )
+        }
+
+        viewModelScope.launch {
+            chatRepository.sendMessage(
+                conversationId = conversationId,
+                senderId = myId,
+                recipientId = otherUserId,
+                content = text,
+                attachmentUri = attachmentUri,
+                attachmentType = attachmentType,
+                attachmentSize = attachmentSize,
+                attachmentName = attachmentName
+            )
+        }
+    }
+
+    fun retryMessage(messageId: String) {
+        viewModelScope.launch {
+            chatRepository.retryMessage(messageId)
         }
     }
 

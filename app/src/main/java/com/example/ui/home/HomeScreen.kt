@@ -634,6 +634,10 @@ fun ConversationListItem(
     val colors = com.example.ui.theme.BrutalistTheme.colors
     val isSenderMe = item.conversation.lastMessageSenderId == currentUserId
     val dateText = com.example.util.DateTimeUtils.formatConversationListTime(item.conversation.updatedAt)
+    val isPeerOnline = com.example.util.DateTimeUtils.isEffectivelyOnline(
+        isOnline = item.otherUser.isOnline,
+        lastSeenTimestamp = item.otherUser.lastSeenTimestamp
+    )
 
     BrutalistCard(
         modifier = Modifier.fillMaxWidth(),
@@ -653,7 +657,7 @@ fun ConversationListItem(
             BrutalistAvatar(
                 seedOrName = item.otherUser.displayName,
                 size = 48.dp,
-                isOnline = item.otherUser.isOnline
+                isOnline = isPeerOnline
             )
 
             Spacer(modifier = Modifier.width(12.dp))
@@ -751,6 +755,15 @@ fun DirectoryUserItem(
     onStartChat: () -> Unit
 ) {
     val colors = com.example.ui.theme.BrutalistTheme.colors
+    val isUserOnline = com.example.util.DateTimeUtils.isEffectivelyOnline(
+        isOnline = user.isOnline,
+        lastSeenTimestamp = user.lastSeenTimestamp
+    )
+    val statusBadgeText = if (isUserOnline) {
+        "[ONLINE]"
+    } else {
+        "[${com.example.util.DateTimeUtils.formatLastSeen(false, user.lastSeenTimestamp)}]"
+    }
     BrutalistCard(
         modifier = Modifier.fillMaxWidth(),
         backgroundColor = colors.cardBackground,
@@ -768,7 +781,7 @@ fun DirectoryUserItem(
             BrutalistAvatar(
                 seedOrName = user.displayName,
                 size = 46.dp,
-                isOnline = user.isOnline
+                isOnline = isUserOnline
             )
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -782,11 +795,11 @@ fun DirectoryUserItem(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (user.isOnline) "[ONLINE]" else "[${com.example.util.DateTimeUtils.formatLastSeen(false, user.lastSeenTimestamp)}]",
+                        text = statusBadgeText,
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
-                        color = if (user.isOnline) EasappOnlineGreen else colors.textSecondary
+                        color = if (isUserOnline) EasappOnlineGreen else colors.textSecondary
                     )
                 }
                 Text(

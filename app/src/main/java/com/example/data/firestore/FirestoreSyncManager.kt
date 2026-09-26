@@ -43,6 +43,7 @@ class FirestoreSyncManager(
     private val listeners = mutableListOf<ListenerRegistration>()
     private val messageListeners = mutableMapOf<String, ListenerRegistration>()
     private val typingListeners = mutableMapOf<String, ListenerRegistration>()
+    private val broadcastedMessageStatuses = java.util.concurrent.ConcurrentHashMap<String, String>()
     private var globalUsersListener: ListenerRegistration? = null
 
     init {
@@ -101,12 +102,12 @@ class FirestoreSyncManager(
             val displayName = doc.getString("displayName") ?: cleanUser
             val avatarSeed = doc.getString("photoURL") ?: doc.getString("avatarSeed") ?: "BRUTAL_1"
             val statusMessage = doc.getString("statusMessage") ?: "Available on Easapp"
+            val createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
             val lastSeenTimestamp = doc.getLong("lastSeen")
                 ?: doc.getLong("lastSeenTimestamp")
-                ?: System.currentTimeMillis()
+                ?: createdAt
             val rawOnline = doc.getBoolean("online") ?: doc.getBoolean("isOnline") ?: false
-            val isOnline = rawOnline && (System.currentTimeMillis() - lastSeenTimestamp) < 300_000L
-            val createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+            val isOnline = rawOnline && lastSeenTimestamp > 0L && (System.currentTimeMillis() - lastSeenTimestamp) < 90_000L
 
             val user = UserEntity(
                 id = id,
@@ -120,7 +121,7 @@ class FirestoreSyncManager(
                 lastSeenTimestamp = lastSeenTimestamp,
                 createdAt = createdAt
             )
-            userDao.upsertRemoteUser(user)
+            userDao.upsertRemoteUser(user, allowPresenceUpdate = true)
             user
         } catch (e: Exception) {
             Log.e(tag, "User parse error: ${e.message}")
@@ -303,21 +304,37 @@ class FirestoreSyncManager(
                                     val content = doc.getString("text") ?: doc.getString("content") ?: ""
                                     val timestamp = doc.getLong("createdAt") ?: doc.getLong("timestamp") ?: System.currentTimeMillis()
                                     val cloudStatus = doc.getString("status") ?: MessageStatus.SENT.name
+                                    val mediaUrl = doc.getString("mediaUrl")?.ifBlank { null }
                                     val attachmentUri = doc.getString("attachmentUri")?.ifBlank { null }
                                     val attachmentType = doc.getString("attachmentType")?.ifBlank { null }
                                     val attachmentSize = doc.getLong("attachmentSize")?.takeIf { it > 0L }
                                     val attachmentName = doc.getString("attachmentName")?.ifBlank { null }
+                                    val rawType = doc.getString("type") ?: ""
+                                    val isImage = rawType.equals("image", ignoreCase = true) ||
+                                        !mediaUrl.isNullOrBlank() ||
+                                        !attachmentUri.isNullOrBlank() ||
+                                        attachmentType != null
+
+                                    if (senderId != currentUserId && timestamp > 0L) {
+                                        userDao.recordPeerActivity(senderId, timestamp)
+                                    }
 
                                     val isViewing = recipientId == currentUserId &&
                                         RealtimeManager.isUserViewingConversation(currentUserId, canonicalConvId)
 
                                     val effectiveStatus = when {
                                         isViewing && cloudStatus != MessageStatus.READ.name -> {
-                                            updateMessageStatusInCloud(canonicalConvId, id, MessageStatus.READ.name)
+                                            if (broadcastedMessageStatuses[id] != MessageStatus.READ.name) {
+                                                broadcastedMessageStatuses[id] = MessageStatus.READ.name
+                                                updateMessageStatusInCloud(canonicalConvId, id, MessageStatus.READ.name)
+                                            }
                                             MessageStatus.READ.name
                                         }
                                         recipientId == currentUserId && cloudStatus == MessageStatus.SENT.name -> {
-                                            updateMessageStatusInCloud(canonicalConvId, id, MessageStatus.DELIVERED.name)
+                                            if (broadcastedMessageStatuses[id] == null) {
+                                                broadcastedMessageStatuses[id] = MessageStatus.DELIVERED.name
+                                                updateMessageStatusInCloud(canonicalConvId, id, MessageStatus.DELIVERED.name)
+                                            }
                                             MessageStatus.DELIVERED.name
                                         }
                                         else -> cloudStatus
@@ -331,12 +348,14 @@ class FirestoreSyncManager(
                                         content = content,
                                         timestamp = timestamp,
                                         status = effectiveStatus,
-                                        attachmentUri = attachmentUri,
-                                        attachmentType = attachmentType,
+                                        type = if (isImage) "image" else "text",
+                                        mediaUrl = mediaUrl ?: attachmentUri,
+                                        attachmentUri = attachmentUri ?: mediaUrl,
+                                        attachmentType = attachmentType ?: if (isImage) "IMAGE" else null,
                                         attachmentSize = attachmentSize,
                                         attachmentName = attachmentName
                                     )
-                                    messageDao.insertMessage(message)
+                                    messageDao.upsertMessageSafely(message)
                                     conversationDao.updateLastMessageStatus(canonicalConvId, effectiveStatus)
                                 } catch (e: Exception) {
                                     Log.e(tag, "Message parse error: ${e.message}")
@@ -517,10 +536,13 @@ class FirestoreSyncManager(
         }
     }
 
-    suspend fun syncMessageToCloud(message: MessageEntity) = withContext(Dispatchers.IO) {
-        val db = firestore ?: return@withContext
+    suspend fun syncMessageToCloud(message: MessageEntity): Boolean = withContext(Dispatchers.IO) {
+        val db = firestore ?: return@withContext false
         try {
             val canonicalConvId = buildDeterministicConversationId(message.senderId, message.recipientId)
+            val isImage = message.type.equals("image", ignoreCase = true) ||
+                !message.mediaUrl.isNullOrBlank() ||
+                !message.attachmentUri.isNullOrBlank()
             val msgMap = hashMapOf(
                 "messageId" to message.id,
                 "id" to message.id,
@@ -528,13 +550,15 @@ class FirestoreSyncManager(
                 "senderId" to message.senderId,
                 "receiverId" to message.recipientId,
                 "recipientId" to message.recipientId,
+                "type" to if (isImage) "image" else "text",
                 "text" to message.content,
                 "content" to message.content,
+                "mediaUrl" to (message.mediaUrl ?: message.attachmentUri ?: ""),
                 "createdAt" to message.timestamp,
                 "timestamp" to message.timestamp,
-                "status" to message.status,
-                "attachmentUri" to (message.attachmentUri ?: ""),
-                "attachmentType" to (message.attachmentType ?: ""),
+                "status" to MessageStatus.SENT.name,
+                "attachmentUri" to (message.attachmentUri ?: message.mediaUrl ?: ""),
+                "attachmentType" to (message.attachmentType ?: if (isImage) "IMAGE" else ""),
                 "attachmentSize" to (message.attachmentSize ?: 0L),
                 "attachmentName" to (message.attachmentName ?: "")
             )
@@ -543,8 +567,11 @@ class FirestoreSyncManager(
                 .collection("messages")
                 .document(message.id)
                 .set(msgMap, SetOptions.merge())
+                .await()
+            true
         } catch (e: Exception) {
             Log.e(tag, "Failed to sync message: ${e.message}")
+            false
         }
     }
 

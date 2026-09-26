@@ -9,6 +9,7 @@ import androidx.room.Update
 import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
 import com.example.data.model.UserEntity
+import com.example.data.model.mergeMessageStatus
 import com.example.data.model.normalizeUsername
 import kotlinx.coroutines.flow.Flow
 
@@ -77,7 +78,7 @@ interface UserDao {
     suspend fun deleteUserById(id: String)
 
     @Transaction
-    suspend fun upsertRemoteUser(remoteUser: UserEntity) {
+    suspend fun upsertRemoteUser(remoteUser: UserEntity, allowPresenceUpdate: Boolean = true) {
         val norm = normalizeUsername(remoteUser.usernameNormalized.ifBlank { remoteUser.username })
         if (norm.isBlank()) return
         val existingById = getUserByIdDirect(remoteUser.id)
@@ -94,11 +95,31 @@ interface UserDao {
         } else {
             existingById?.passwordHash ?: ""
         }
+
+        val now = System.currentTimeMillis()
+        val keepExistingPresence = existingById != null &&
+            existingById.lastSeenTimestamp > 0L &&
+            (!allowPresenceUpdate || remoteUser.lastSeenTimestamp < existingById.lastSeenTimestamp)
+
+        val finalLastSeen = if (keepExistingPresence) {
+            existingById!!.lastSeenTimestamp
+        } else {
+            remoteUser.lastSeenTimestamp
+        }
+        val rawOnline = if (keepExistingPresence) {
+            existingById!!.isOnline
+        } else {
+            remoteUser.isOnline
+        }
+        val finalOnline = rawOnline && finalLastSeen > 0L && (now - finalLastSeen) < 90_000L
+
         insertUser(
             remoteUser.copy(
                 username = remoteUser.username.trim().removePrefix("@").trim(),
                 usernameNormalized = norm,
-                passwordHash = preservedHash
+                passwordHash = preservedHash,
+                isOnline = finalOnline,
+                lastSeenTimestamp = finalLastSeen
             )
         )
     }
@@ -108,6 +129,19 @@ interface UserDao {
 
     @Query("UPDATE users SET isOnline = :isOnline, lastSeenTimestamp = :lastSeen WHERE id = :userId")
     suspend fun updateOnlineStatus(userId: String, isOnline: Boolean, lastSeen: Long)
+
+    @Query("UPDATE users SET isOnline = :isOnline, lastSeenTimestamp = :lastSeen WHERE id = :userId AND (:lastSeen >= lastSeenTimestamp OR lastSeenTimestamp <= 0)")
+    suspend fun updateRemotePresenceIfNewer(userId: String, isOnline: Boolean, lastSeen: Long)
+
+    @Query(
+        """
+        UPDATE users 
+        SET isOnline = CASE WHEN (:now - :activityTimestamp) < 90000 THEN 1 ELSE isOnline END,
+            lastSeenTimestamp = MAX(lastSeenTimestamp, :activityTimestamp)
+        WHERE id = :userId AND :activityTimestamp >= lastSeenTimestamp
+        """
+    )
+    suspend fun recordPeerActivity(userId: String, activityTimestamp: Long, now: Long = System.currentTimeMillis())
 }
 
 @Dao
@@ -142,11 +176,64 @@ interface ConversationDao {
 
 @Dao
 interface MessageDao {
-    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY timestamp ASC")
+    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY timestamp ASC, id ASC")
     fun getMessagesForConversation(conversationId: String): Flow<List<MessageEntity>>
+
+    @Query("SELECT * FROM messages WHERE id = :messageId LIMIT 1")
+    suspend fun getMessageByIdDirect(messageId: String): MessageEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMessage(message: MessageEntity)
+
+    @Transaction
+    suspend fun upsertMessageSafely(incoming: MessageEntity) {
+        val existing = getMessageByIdDirect(incoming.id)
+        if (existing == null) {
+            insertMessage(incoming)
+        } else {
+            val mergedStatus = mergeMessageStatus(existing.status, incoming.status)
+            val mergedMediaUrl = when {
+                !incoming.mediaUrl.isNullOrBlank() && incoming.mediaUrl.startsWith("http") -> incoming.mediaUrl
+                !existing.mediaUrl.isNullOrBlank() && existing.mediaUrl.startsWith("http") -> existing.mediaUrl
+                !incoming.mediaUrl.isNullOrBlank() -> incoming.mediaUrl
+                else -> existing.mediaUrl
+            }
+            val mergedAttachmentUri = when {
+                !existing.attachmentUri.isNullOrBlank() && existing.attachmentUri.startsWith("file:") -> existing.attachmentUri
+                !incoming.attachmentUri.isNullOrBlank() &&
+                    (existing.attachmentUri.isNullOrBlank() || incoming.attachmentUri.length >= existing.attachmentUri.length) -> incoming.attachmentUri
+                else -> existing.attachmentUri ?: incoming.attachmentUri
+            }
+            val isImage = incoming.type == "image" ||
+                existing.type == "image" ||
+                !mergedMediaUrl.isNullOrBlank() ||
+                !mergedAttachmentUri.isNullOrBlank()
+
+            insertMessage(
+                existing.copy(
+                    conversationId = incoming.conversationId.ifBlank { existing.conversationId },
+                    content = if (incoming.content.isNotBlank()) incoming.content else existing.content,
+                    timestamp = if (existing.timestamp > 0L) existing.timestamp else incoming.timestamp,
+                    status = mergedStatus,
+                    type = if (isImage) "image" else "text",
+                    mediaUrl = mergedMediaUrl ?: mergedAttachmentUri,
+                    attachmentUri = mergedAttachmentUri ?: mergedMediaUrl,
+                    attachmentType = incoming.attachmentType ?: existing.attachmentType,
+                    attachmentSize = incoming.attachmentSize ?: existing.attachmentSize,
+                    attachmentName = incoming.attachmentName ?: existing.attachmentName
+                )
+            )
+        }
+    }
+
+    @Transaction
+    suspend fun advanceMessageStatus(messageId: String, newStatus: String) {
+        val existing = getMessageByIdDirect(messageId) ?: return
+        val merged = mergeMessageStatus(existing.status, newStatus)
+        if (merged != existing.status) {
+            updateSingleMessageStatus(messageId, merged)
+        }
+    }
 
     @Update
     suspend fun updateMessage(message: MessageEntity)
