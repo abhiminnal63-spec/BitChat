@@ -65,21 +65,23 @@ class ChatRepository(
             return@withContext existing.id
         }
 
-        val newId = UUID.randomUUID().toString()
+        val sortedIds = listOf(currentUserId.trim(), otherUserId.trim()).sorted()
+        val deterministicId = "conv_${sortedIds[0]}_${sortedIds[1]}"
+        val now = System.currentTimeMillis()
         val newConv = ConversationEntity(
-            id = newId,
-            participant1Id = currentUserId,
-            participant2Id = otherUserId,
+            id = deterministicId,
+            participant1Id = sortedIds[0],
+            participant2Id = sortedIds[1],
             lastMessageText = "",
-            lastMessageTimestamp = System.currentTimeMillis(),
+            lastMessageTimestamp = now,
             lastMessageSenderId = "",
             unreadCountForUser1 = 0,
             unreadCountForUser2 = 0,
-            updatedAt = System.currentTimeMillis()
+            updatedAt = now
         )
         conversationDao.insertConversation(newConv)
         firestoreSyncManager?.syncConversationToCloud(newConv)
-        newId
+        deterministicId
     }
 
     suspend fun sendMessage(

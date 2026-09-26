@@ -84,7 +84,7 @@ class AuthViewModel(
 
                 val result = userRepository.registerUser(
                     rawUsername = state.username,
-                    displayName = state.displayName.ifBlank { state.username },
+                    displayName = state.displayName,
                     rawPassword = state.password
                 )
 

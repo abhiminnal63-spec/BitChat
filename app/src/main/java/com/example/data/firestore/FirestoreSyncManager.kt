@@ -9,6 +9,8 @@ import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
 import com.example.data.model.MessageStatus
 import com.example.data.model.UserEntity
+import com.example.data.model.cleanDisplayUsername
+import com.example.data.model.normalizeUsername
 import com.example.data.realtime.RealtimeManager
 import com.google.firebase.FirebaseApp
 import com.google.firebase.firestore.FirebaseFirestore
@@ -20,6 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 
 class FirestoreSyncManager(
@@ -38,6 +41,7 @@ class FirestoreSyncManager(
     private val listeners = mutableListOf<ListenerRegistration>()
     private val messageListeners = mutableMapOf<String, ListenerRegistration>()
     private val typingListeners = mutableMapOf<String, ListenerRegistration>()
+    private var globalUsersListener: ListenerRegistration? = null
 
     init {
         initializeFirestore()
@@ -48,9 +52,10 @@ class FirestoreSyncManager(
             if (FirebaseApp.getApps(context).isNotEmpty()) {
                 firestore = FirebaseFirestore.getInstance()
                 _isCloudConnected.value = true
+                startGlobalUsersListener()
                 Log.d(tag, "Firestore successfully initialized.")
             } else {
-                Log.w(tag, "FirebaseApp is not initialized yet. Operating in local mode until configured.")
+                Log.w(tag, "FirebaseApp is not initialized yet. Operating with GlobalRelayEngine cloud backend.")
                 _isCloudConnected.value = false
             }
         } catch (e: Exception) {
@@ -59,9 +64,69 @@ class FirestoreSyncManager(
         }
     }
 
+    private fun startGlobalUsersListener() {
+        val db = firestore ?: return
+        if (globalUsersListener != null) return
+        try {
+            globalUsersListener = db.collection("users").addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    Log.e(tag, "Error listening to global users: ${error.message}")
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    scope.launch {
+                        for (doc in snapshot.documents) {
+                            parseAndUpsertUserDoc(doc)
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to start global users listener: ${e.message}")
+        }
+    }
+
+    private suspend fun parseAndUpsertUserDoc(doc: com.google.firebase.firestore.DocumentSnapshot): UserEntity? {
+        return try {
+            val id = doc.getString("id") ?: doc.id
+            val rawUsername = doc.getString("username") ?: return null
+            val cleanUser = cleanDisplayUsername(rawUsername)
+            val normUser = doc.getString("usernameNormalized")?.let { normalizeUsername(it) }
+                ?.ifBlank { normalizeUsername(cleanUser) }
+                ?: normalizeUsername(cleanUser)
+            if (normUser.isBlank()) return null
+
+            val displayName = doc.getString("displayName") ?: cleanUser
+            val avatarSeed = doc.getString("avatarSeed") ?: "BRUTAL_1"
+            val statusMessage = doc.getString("statusMessage") ?: "Using Easapp"
+            val isOnline = doc.getBoolean("isOnline") ?: false
+            val lastSeenTimestamp = doc.getLong("lastSeenTimestamp") ?: System.currentTimeMillis()
+            val createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+
+            val user = UserEntity(
+                id = id,
+                username = cleanUser,
+                usernameNormalized = normUser,
+                displayName = displayName,
+                passwordHash = "", // Never expose or read passwordHash from public profile documents
+                avatarSeed = avatarSeed,
+                statusMessage = statusMessage,
+                isOnline = isOnline,
+                lastSeenTimestamp = lastSeenTimestamp,
+                createdAt = createdAt
+            )
+            userDao.upsertRemoteUser(user)
+            user
+        } catch (e: Exception) {
+            Log.e(tag, "User parse error: ${e.message}")
+            null
+        }
+    }
+
     fun startSync(currentUserId: String) {
         val db = firestore ?: return
         stopSync()
+        startGlobalUsersListener()
 
         try {
             // 1. Listen to all registered users from Firestore
@@ -73,32 +138,7 @@ class FirestoreSyncManager(
                 if (snapshot != null) {
                     scope.launch {
                         for (doc in snapshot.documents) {
-                            try {
-                                val id = doc.getString("id") ?: doc.id
-                                val username = doc.getString("username") ?: continue
-                                val displayName = doc.getString("displayName") ?: username
-                                val passwordHash = doc.getString("passwordHash") ?: ""
-                                val avatarSeed = doc.getString("avatarSeed") ?: "BRUTAL_1"
-                                val statusMessage = doc.getString("statusMessage") ?: "Using Easapp"
-                                val isOnline = doc.getBoolean("isOnline") ?: false
-                                val lastSeenTimestamp = doc.getLong("lastSeenTimestamp") ?: System.currentTimeMillis()
-                                val createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
-
-                                val user = UserEntity(
-                                    id = id,
-                                    username = username,
-                                    displayName = displayName,
-                                    passwordHash = passwordHash,
-                                    avatarSeed = avatarSeed,
-                                    statusMessage = statusMessage,
-                                    isOnline = isOnline,
-                                    lastSeenTimestamp = lastSeenTimestamp,
-                                    createdAt = createdAt
-                                )
-                                userDao.insertUser(user)
-                            } catch (e: Exception) {
-                                Log.e(tag, "User parse error: ${e.message}")
-                            }
+                            parseAndUpsertUserDoc(doc)
                         }
                     }
                 }
@@ -282,20 +322,94 @@ class FirestoreSyncManager(
     suspend fun syncUserToCloud(user: UserEntity) = withContext(Dispatchers.IO) {
         val db = firestore ?: return@withContext
         try {
+            val cleanUser = cleanDisplayUsername(user.username)
+            val normUser = normalizeUsername(user.usernameNormalized.ifBlank { cleanUser })
+            // Public searchable profile document — never expose passwordHash or private credentials
             val userMap = hashMapOf(
                 "id" to user.id,
-                "username" to user.username,
+                "username" to cleanUser,
+                "usernameNormalized" to normUser,
                 "displayName" to user.displayName,
-                "passwordHash" to user.passwordHash,
                 "avatarSeed" to user.avatarSeed,
                 "statusMessage" to user.statusMessage,
                 "isOnline" to user.isOnline,
                 "lastSeenTimestamp" to user.lastSeenTimestamp,
                 "createdAt" to user.createdAt
             )
-            db.collection("users").document(user.id).set(userMap, SetOptions.merge())
+            db.collection("users").document(user.id).set(userMap, SetOptions.merge()).await()
+
+            val usernameIndexMap = hashMapOf(
+                "uid" to user.id,
+                "username" to cleanUser,
+                "usernameNormalized" to normUser,
+                "createdAt" to user.createdAt
+            )
+            db.collection("usernames").document(normUser).set(usernameIndexMap, SetOptions.merge()).await()
         } catch (e: Exception) {
             Log.e(tag, "Failed to push user to cloud: ${e.message}")
+        }
+    }
+
+    suspend fun checkUsernameExistsInCloud(rawUsername: String): Result<UserEntity?>? = withContext(Dispatchers.IO) {
+        val db = firestore ?: return@withContext null
+        val norm = normalizeUsername(rawUsername)
+        if (norm.isBlank()) return@withContext Result.success(null)
+        try {
+            val byNorm = db.collection("users")
+                .whereEqualTo("usernameNormalized", norm)
+                .limit(1)
+                .get()
+                .await()
+            if (!byNorm.isEmpty) {
+                val matched = parseAndUpsertUserDoc(byNorm.documents.first())
+                return@withContext Result.success(matched)
+            }
+
+            // Also check all users in case legacy documents lacked usernameNormalized
+            val allDocs = db.collection("users").get().await()
+            for (doc in allDocs.documents) {
+                val parsed = parseAndUpsertUserDoc(doc)
+                if (parsed != null && parsed.usernameNormalized == norm) {
+                    return@withContext Result.success(parsed)
+                }
+            }
+            Result.success(null)
+        } catch (e: Exception) {
+            Log.e(tag, "Firestore username check error: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun searchUsersInCloud(rawQuery: String, excludeUserId: String): Result<List<UserEntity>>? = withContext(Dispatchers.IO) {
+        val db = firestore ?: return@withContext null
+        val normQuery = normalizeUsername(rawQuery)
+        try {
+            val snapshot = db.collection("users").get().await()
+            val results = mutableListOf<UserEntity>()
+            for (doc in snapshot.documents) {
+                val parsed = parseAndUpsertUserDoc(doc) ?: continue
+                if (parsed.id == excludeUserId) continue
+                if (normQuery.isBlank() ||
+                    parsed.usernameNormalized.contains(normQuery) ||
+                    parsed.username.lowercase().contains(normQuery) ||
+                    parsed.displayName.lowercase().contains(normQuery)
+                ) {
+                    results.add(parsed)
+                }
+            }
+            val sorted = results.sortedWith(
+                compareBy<UserEntity> {
+                    when {
+                        it.usernameNormalized == normQuery -> 0
+                        it.usernameNormalized.startsWith(normQuery) -> 1
+                        else -> 2
+                    }
+                }.thenByDescending { it.isOnline }.thenBy { it.displayName.lowercase() }
+            )
+            Result.success(sorted)
+        } catch (e: Exception) {
+            Log.e(tag, "Firestore search error: ${e.message}")
+            Result.failure(e)
         }
     }
 

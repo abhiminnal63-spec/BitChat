@@ -307,31 +307,139 @@ fun HomeScreen(
                     .weight(1f)
                     .fillMaxWidth()
             ) {
+                val isSearchActive = uiState.searchQuery.isNotBlank()
                 if (uiState.activeTab == 0) {
-                    // CONVERSATIONS TAB
-                    if (conversations.isEmpty()) {
-                        EmptyConversationsState(
-                            hasSearchQuery = uiState.searchQuery.isNotBlank(),
-                            onExploreUsers = onNavigateToNewChat
-                        )
-                    } else {
-                        LazyColumn(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            items(conversations, key = { it.conversation.id }) { item ->
-                                ConversationListItem(
-                                    item = item,
-                                    currentUserId = currentUser?.id ?: "",
-                                    onClick = {
-                                        onNavigateToChat(item.conversation.id, item.otherUser.id)
+                    // CONVERSATIONS & REALTIME USERNAME SEARCH TAB
+                    when {
+                        isSearchActive && uiState.searchErrorMessage != null && conversations.isEmpty() -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                BrutalistCard(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("home_search_error_card"),
+                                    backgroundColor = colors.cardBackground,
+                                    borderColor = EasappSecondary,
+                                    shadowOffset = 4.dp
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(20.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Text(
+                                            text = "Unable to search because of a network/backend error.",
+                                            fontWeight = FontWeight.Black,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 13.sp,
+                                            color = colors.textPrimary
+                                        )
+                                        BrutalistButton(
+                                            text = "RETRY CLOUD SEARCH",
+                                            onClick = { viewModel.retrySearch() },
+                                            backgroundColor = colors.accent,
+                                            textColor = colors.accentOn,
+                                            shadowOffset = 2.dp
+                                        )
                                     }
-                                )
+                                }
                             }
-                            item {
-                                Spacer(modifier = Modifier.height(72.dp))
+                        }
+
+                        isSearchActive && uiState.isSearchingBackend && conversations.isEmpty() && directoryUsers.isEmpty() -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                BrutalistCard(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    backgroundColor = colors.cardBackground,
+                                    borderColor = colors.border,
+                                    shadowOffset = 4.dp
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(20.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Text(
+                                            text = "SEARCHING SHARED BACKEND...",
+                                            fontWeight = FontWeight.Black,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 13.sp,
+                                            color = colors.textPrimary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        conversations.isEmpty() && (!isSearchActive || directoryUsers.isEmpty()) -> {
+                            EmptyConversationsState(
+                                hasSearchQuery = isSearchActive,
+                                onExploreUsers = onNavigateToNewChat
+                            )
+                        }
+
+                        else -> {
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                if (isSearchActive && directoryUsers.isNotEmpty()) {
+                                    item(key = "header_matching_users") {
+                                        Text(
+                                            text = "REGISTERED ACCOUNTS (${directoryUsers.size})",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Black,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = colors.textPrimary
+                                        )
+                                    }
+                                    items(directoryUsers, key = { "search_user_${it.id}" }) { user ->
+                                        DirectoryUserItem(
+                                            user = user,
+                                            onStartChat = {
+                                                viewModel.startChatWithUser(user.id, onNavigateToChat)
+                                            }
+                                        )
+                                    }
+                                }
+
+                                if (conversations.isNotEmpty()) {
+                                    if (isSearchActive) {
+                                        item(key = "header_matching_chats") {
+                                            Text(
+                                                text = "CONVERSATIONS (${conversations.size})",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Black,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = colors.textPrimary
+                                            )
+                                        }
+                                    }
+                                    items(conversations, key = { it.conversation.id }) { item ->
+                                        ConversationListItem(
+                                            item = item,
+                                            currentUserId = currentUser?.id ?: "",
+                                            onClick = {
+                                                onNavigateToChat(item.conversation.id, item.otherUser.id)
+                                            }
+                                        )
+                                    }
+                                }
+
+                                item {
+                                    Spacer(modifier = Modifier.height(72.dp))
+                                }
                             }
                         }
                     }
@@ -748,7 +856,7 @@ fun EmptyConversationsState(
                     )
                 }
                 Text(
-                    text = if (hasSearchQuery) "NO MATCHING CONVERSATIONS" else "ZERO CONVERSATIONS DETECTED",
+                    text = if (hasSearchQuery) "No registered user found" else "ZERO CONVERSATIONS DETECTED",
                     fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 14.sp,
@@ -791,7 +899,7 @@ fun EmptyDirectoryState(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = if (hasSearchQuery) "NO USERS FOUND" else "YOU ARE THE FIRST USER",
+                    text = if (hasSearchQuery) "No registered user found" else "YOU ARE THE FIRST USER",
                     fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 14.sp,

@@ -4,17 +4,26 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
+fun normalizeUsername(raw: String): String {
+    return raw.trim().trimStart('@').trim().lowercase()
+}
+
+fun cleanDisplayUsername(raw: String): String {
+    return raw.trim().trimStart('@').trim()
+}
+
 @Entity(
     tableName = "users",
     indices = [
-        Index(value = ["username"], unique = true)
+        Index(value = ["usernameNormalized"], unique = true)
     ]
 )
 data class UserEntity(
     @PrimaryKey val id: String,
     val username: String,
+    val usernameNormalized: String = normalizeUsername(username),
     val displayName: String,
-    val passwordHash: String,
+    val passwordHash: String = "",
     val avatarSeed: String = "",
     val statusMessage: String = "Using Easapp",
     val isOnline: Boolean = false,

@@ -4,10 +4,12 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
 import com.example.data.model.UserEntity
+import com.example.data.model.normalizeUsername
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -18,11 +20,46 @@ interface UserDao {
     @Query("SELECT * FROM users WHERE id = :id")
     suspend fun getUserByIdDirect(id: String): UserEntity?
 
-    @Query("SELECT * FROM users WHERE LOWER(username) = LOWER(:username) LIMIT 1")
-    suspend fun getUserByUsername(username: String): UserEntity?
+    @Query("SELECT * FROM users WHERE usernameNormalized = LOWER(TRIM(:usernameNormalized)) OR LOWER(username) = LOWER(TRIM(:usernameNormalized)) LIMIT 1")
+    suspend fun getUserByUsername(usernameNormalized: String): UserEntity?
 
-    @Query("SELECT * FROM users WHERE id != :excludeId AND (LOWER(username) LIKE '%' || LOWER(:query) || '%' OR LOWER(displayName) LIKE '%' || LOWER(:query) || '%') ORDER BY displayName ASC")
-    fun searchUsers(query: String, excludeId: String): Flow<List<UserEntity>>
+    @Query(
+        """
+        SELECT * FROM users 
+        WHERE id != :excludeId 
+        AND (
+            usernameNormalized LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%' 
+            OR LOWER(username) LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%' 
+            OR LOWER(displayName) LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%'
+        ) 
+        ORDER BY 
+            CASE WHEN usernameNormalized = LOWER(TRIM(:normalizedQuery)) THEN 0
+                 WHEN usernameNormalized LIKE LOWER(TRIM(:normalizedQuery)) || '%' THEN 1
+                 ELSE 2 END,
+            isOnline DESC,
+            displayName ASC
+        """
+    )
+    fun searchUsers(normalizedQuery: String, excludeId: String): Flow<List<UserEntity>>
+
+    @Query(
+        """
+        SELECT * FROM users 
+        WHERE id != :excludeId 
+        AND (
+            usernameNormalized LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%' 
+            OR LOWER(username) LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%' 
+            OR LOWER(displayName) LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%'
+        ) 
+        ORDER BY 
+            CASE WHEN usernameNormalized = LOWER(TRIM(:normalizedQuery)) THEN 0
+                 WHEN usernameNormalized LIKE LOWER(TRIM(:normalizedQuery)) || '%' THEN 1
+                 ELSE 2 END,
+            isOnline DESC,
+            displayName ASC
+        """
+    )
+    suspend fun searchUsersDirect(normalizedQuery: String, excludeId: String): List<UserEntity>
 
     @Query("SELECT * FROM users WHERE id != :excludeId ORDER BY isOnline DESC, displayName ASC")
     fun getAllUsersExcept(excludeId: String): Flow<List<UserEntity>>
@@ -35,6 +72,36 @@ interface UserDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertUser(user: UserEntity)
+
+    @Query("DELETE FROM users WHERE id = :id")
+    suspend fun deleteUserById(id: String)
+
+    @Transaction
+    suspend fun upsertRemoteUser(remoteUser: UserEntity) {
+        val norm = normalizeUsername(remoteUser.usernameNormalized.ifBlank { remoteUser.username })
+        if (norm.isBlank()) return
+        val existingById = getUserByIdDirect(remoteUser.id)
+        val existingByUsername = getUserByUsername(norm)
+        if (existingByUsername != null && existingByUsername.id != remoteUser.id) {
+            if (remoteUser.createdAt <= existingByUsername.createdAt) {
+                deleteUserById(existingByUsername.id)
+            } else {
+                return
+            }
+        }
+        val preservedHash = if (remoteUser.passwordHash.isNotBlank()) {
+            remoteUser.passwordHash
+        } else {
+            existingById?.passwordHash ?: ""
+        }
+        insertUser(
+            remoteUser.copy(
+                username = remoteUser.username.trim().removePrefix("@").trim(),
+                usernameNormalized = norm,
+                passwordHash = preservedHash
+            )
+        )
+    }
 
     @Update
     suspend fun updateUser(user: UserEntity)
