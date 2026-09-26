@@ -4,6 +4,11 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -47,6 +52,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -311,7 +317,8 @@ fun ChatScreen(
                                 },
                                 onShareImage = { uri ->
                                     ImageUtils.shareImage(context, uri, "Shared via Easapp")
-                                }
+                                },
+                                modifier = Modifier.animateItem()
                             )
                         }
 
@@ -442,10 +449,24 @@ fun ChatScreen(
 
                     // Tactile Send Button
                     val canSend = uiState.textInput.isNotBlank() || uiState.selectedAttachmentUri != null
+                    val sendBgColor by animateColorAsState(
+                        targetValue = if (canSend) colors.accent else colors.inputBackground,
+                        animationSpec = tween(durationMillis = 200),
+                        label = "send_bg_color"
+                    )
+                    val sendScale by animateFloatAsState(
+                        targetValue = if (canSend) 1f else 0.94f,
+                        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+                        label = "send_scale"
+                    )
                     Box(
                         modifier = Modifier
                             .size(44.dp)
-                            .background(if (canSend) colors.accent else colors.inputBackground, SharpCorner)
+                            .graphicsLayer {
+                                scaleX = sendScale
+                                scaleY = sendScale
+                            }
+                            .background(sendBgColor, SharpCorner)
                             .border(2.dp, colors.border, SharpCorner)
                             .clickable(enabled = canSend) {
                                 viewModel.sendMessage()

@@ -108,29 +108,7 @@ fun AuthScreen(
                                 letterSpacing = (-1).sp,
                                 color = colors.accentOn
                             )
-                            Box(
-                                modifier = Modifier
-                                    .background(BrutalistBlack, SharpCorner)
-                                    .border(1.dp, colors.border, SharpCorner)
-                                    .padding(horizontal = 8.dp, vertical = 4.dp)
-                            ) {
-                                Text(
-                                    text = "V1.0 // P2P",
-                                    color = colors.accent,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.Monospace
-                                )
-                            }
                         }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "MOBILE-FIRST REALTIME MESSAGING PROTOCOL",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
-                            color = colors.accentOn
-                        )
                     }
                 }
             }

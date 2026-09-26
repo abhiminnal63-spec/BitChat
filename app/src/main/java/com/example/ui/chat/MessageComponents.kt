@@ -1,5 +1,10 @@
 package com.example.ui.chat
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,9 +27,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -33,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.data.model.MessageEntity
+import com.example.data.model.MessageStatus
 import com.example.ui.theme.BrutalistBlack
 import com.example.ui.theme.BrutalistCard
 import com.example.ui.theme.BrutalistTheme
@@ -42,13 +54,17 @@ import com.example.ui.theme.EasappSecondary
 import com.example.ui.theme.MessageStatusIndicator
 import com.example.ui.theme.SharpCorner
 import com.example.util.DateTimeUtils
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 @Composable
 fun MessageBubbleItem(
     message: MessageEntity,
     isOutgoing: Boolean,
     onImageClick: (uri: String) -> Unit,
-    onShareImage: (uri: String) -> Unit
+    onShareImage: (uri: String) -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val colors = BrutalistTheme.colors
     val alignment = if (isOutgoing) Alignment.CenterEnd else Alignment.CenterStart
@@ -57,10 +73,66 @@ fun MessageBubbleItem(
     val timeColor = if (isOutgoing) colors.accentOn.copy(alpha = 0.7f) else colors.textSecondary
     val timeStr = DateTimeUtils.formatMessageTimestamp(message.timestamp)
 
+    val isNewlyDispatched = remember(message.id) {
+        abs(System.currentTimeMillis() - message.timestamp) < 2500L
+    }
+    var displayedStatus by remember(message.id) {
+        mutableStateOf(
+            if (isNewlyDispatched && isOutgoing) MessageStatus.SENDING.name else message.status
+        )
+    }
+    val animAlpha = remember(message.id) { Animatable(if (isNewlyDispatched) 0f else 1f) }
+    val animOffsetY = remember(message.id) { Animatable(if (isNewlyDispatched) 28f else 0f) }
+    val animScale = remember(message.id) { Animatable(if (isNewlyDispatched) 0.92f else 1f) }
+
+    LaunchedEffect(message.id, message.status) {
+        if (isNewlyDispatched && isOutgoing && displayedStatus == MessageStatus.SENDING.name && message.status != MessageStatus.SENDING.name) {
+            delay(220L)
+            displayedStatus = message.status
+        } else {
+            displayedStatus = message.status
+        }
+    }
+
+    LaunchedEffect(message.id) {
+        if (isNewlyDispatched) {
+            launch {
+                animAlpha.animateTo(
+                    targetValue = 1f,
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                )
+            }
+            launch {
+                animOffsetY.animateTo(
+                    targetValue = 0f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioLowBouncy,
+                        stiffness = Spring.StiffnessMediumLow
+                    )
+                )
+            }
+            launch {
+                animScale.animateTo(
+                    targetValue = 1f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioLowBouncy,
+                        stiffness = Spring.StiffnessMediumLow
+                    )
+                )
+            }
+        }
+    }
+
     Box(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp),
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .graphicsLayer {
+                alpha = animAlpha.value
+                translationY = animOffsetY.value
+                scaleX = animScale.value
+                scaleY = animScale.value
+            },
         contentAlignment = alignment
     ) {
         BrutalistCard(
@@ -148,7 +220,7 @@ fun MessageBubbleItem(
                     if (isOutgoing) {
                         Spacer(modifier = Modifier.width(6.dp))
                         MessageStatusIndicator(
-                            status = message.status,
+                            status = displayedStatus,
                             showLabel = true
                         )
                     }

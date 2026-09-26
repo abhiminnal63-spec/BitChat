@@ -296,37 +296,7 @@ fun HomeScreen(
                             }
                         }
 
-                        val isDirActive = uiState.activeTab == 1
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .background(
-                                    if (isDirActive) colors.accent else colors.cardBackground,
-                                    SharpCorner
-                                )
-                                .border(2.dp, colors.border, SharpCorner)
-                                .clickable { viewModel.setActiveTab(1) }
-                                .padding(vertical = 10.dp)
-                                .testTag("tab_home_directory"),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.People,
-                                    contentDescription = null,
-                                    tint = if (isDirActive) colors.accentOn else colors.textPrimary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "DIRECTORY (${directoryUsers.size})",
-                                    fontWeight = FontWeight.Black,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 12.sp,
-                                    color = if (isDirActive) colors.accentOn else colors.textPrimary
-                                )
-                            }
-                        }
+                        Spacer(modifier = Modifier.weight(1f))
                     }
                 }
             }
@@ -342,7 +312,7 @@ fun HomeScreen(
                     if (conversations.isEmpty()) {
                         EmptyConversationsState(
                             hasSearchQuery = uiState.searchQuery.isNotBlank(),
-                            onExploreUsers = { viewModel.setActiveTab(1) }
+                            onExploreUsers = onNavigateToNewChat
                         )
                     } else {
                         LazyColumn(
@@ -783,16 +753,6 @@ fun EmptyConversationsState(
                     fontFamily = FontFamily.Monospace,
                     fontSize = 14.sp,
                     color = colors.textPrimary
-                )
-                Text(
-                    text = if (hasSearchQuery)
-                        "Try a different username search term or browse the full registered directory."
-                    else
-                        "No chats started yet. Easapp uses real registered users from the database. Switch to the [DIRECTORY] tab to discover registered users or tap [+ NEW CHAT].",
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = colors.textSecondary,
-                    lineHeight = 16.sp
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 BrutalistButton(

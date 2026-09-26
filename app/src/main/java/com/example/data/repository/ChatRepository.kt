@@ -10,8 +10,12 @@ import com.example.data.model.MessageStatus
 import com.example.data.model.UserEntity
 import com.example.data.realtime.RealtimeManager
 import com.example.data.relay.GlobalRelayEngine
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
@@ -29,6 +33,7 @@ class ChatRepository(
     val firestoreSyncManager: FirestoreSyncManager? = null,
     val relayEngine: GlobalRelayEngine? = null
 ) {
+    private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun getConversationsForUser(userId: String): Flow<List<ConversationEntity>> {
         return conversationDao.getConversationsForUser(userId)

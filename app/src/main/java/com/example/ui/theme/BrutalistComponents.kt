@@ -1,10 +1,15 @@
 package com.example.ui.theme
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -276,98 +281,107 @@ fun MessageStatusIndicator(
     showLabel: Boolean = true
 ) {
     val colors = BrutalistTheme.colors
-    when (status.uppercase()) {
-        MessageStatus.SENDING.name -> {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
-                if (showLabel) {
-                    Text(
-                        text = "SENDING",
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        color = colors.textSecondary
+    AnimatedContent(
+        targetState = status.uppercase(),
+        transitionSpec = {
+            (fadeIn(animationSpec = tween(220)) + scaleIn(initialScale = 0.85f, animationSpec = tween(220)))
+                .togetherWith(fadeOut(animationSpec = tween(150)))
+        },
+        label = "message_status_transition"
+    ) { currentStatus ->
+        when (currentStatus) {
+            MessageStatus.SENDING.name -> {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
+                    if (showLabel) {
+                        Text(
+                            text = "SENDING",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            color = colors.textSecondary
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                    }
+                    Icon(
+                        imageVector = Icons.Default.AccessTime,
+                        contentDescription = "Sending",
+                        tint = colors.textSecondary,
+                        modifier = Modifier.size(12.dp)
                     )
-                    Spacer(modifier = Modifier.width(3.dp))
                 }
-                Icon(
-                    imageVector = Icons.Default.AccessTime,
-                    contentDescription = "Sending",
-                    tint = colors.textSecondary,
-                    modifier = Modifier.size(12.dp)
-                )
             }
-        }
-        MessageStatus.SENT.name -> {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
-                if (showLabel) {
-                    Text(
-                        text = "SENT",
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        color = colors.textSecondary
+            MessageStatus.SENT.name -> {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
+                    if (showLabel) {
+                        Text(
+                            text = "SENT",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            color = colors.textSecondary
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                    }
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Sent",
+                        tint = colors.textSecondary,
+                        modifier = Modifier.size(13.dp)
                     )
-                    Spacer(modifier = Modifier.width(3.dp))
                 }
+            }
+            MessageStatus.DELIVERED.name -> {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
+                    if (showLabel) {
+                        Text(
+                            text = "DELIVERED",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            color = colors.textSecondary
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                    }
+                    Icon(
+                        imageVector = Icons.Default.DoneAll,
+                        contentDescription = "Delivered",
+                        tint = colors.textSecondary,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
+            MessageStatus.READ.name -> {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = modifier
+                ) {
+                    if (showLabel) {
+                        Text(
+                            text = "SEEN",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Black,
+                            fontFamily = FontFamily.Monospace,
+                            letterSpacing = 0.5.sp,
+                            color = EasappReadBlue
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                    }
+                    Icon(
+                        imageVector = Icons.Default.DoneAll,
+                        contentDescription = "Seen",
+                        tint = EasappReadBlue,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
+            else -> {
                 Icon(
                     imageVector = Icons.Default.Check,
-                    contentDescription = "Sent",
+                    contentDescription = "Message",
                     tint = colors.textSecondary,
-                    modifier = Modifier.size(13.dp)
+                    modifier = modifier.size(13.dp)
                 )
             }
-        }
-        MessageStatus.DELIVERED.name -> {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier) {
-                if (showLabel) {
-                    Text(
-                        text = "DELIVERED",
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        color = colors.textSecondary
-                    )
-                    Spacer(modifier = Modifier.width(3.dp))
-                }
-                Icon(
-                    imageVector = Icons.Default.DoneAll,
-                    contentDescription = "Delivered",
-                    tint = colors.textSecondary,
-                    modifier = Modifier.size(14.dp)
-                )
-            }
-        }
-        MessageStatus.READ.name -> {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = modifier
-            ) {
-                if (showLabel) {
-                    Text(
-                        text = "SEEN",
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Black,
-                        fontFamily = FontFamily.Monospace,
-                        letterSpacing = 0.5.sp,
-                        color = EasappReadBlue
-                    )
-                    Spacer(modifier = Modifier.width(3.dp))
-                }
-                Icon(
-                    imageVector = Icons.Default.DoneAll,
-                    contentDescription = "Seen",
-                    tint = EasappReadBlue,
-                    modifier = Modifier.size(14.dp)
-                )
-            }
-        }
-        else -> {
-            Icon(
-                imageVector = Icons.Default.Check,
-                contentDescription = "Message",
-                tint = colors.textSecondary,
-                modifier = modifier.size(13.dp)
-            )
         }
     }
 }
