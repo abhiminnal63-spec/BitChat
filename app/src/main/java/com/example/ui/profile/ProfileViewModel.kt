@@ -7,10 +7,9 @@ import com.example.data.repository.UserRepository
 import com.example.ui.theme.EasappColorTheme
 import com.example.util.ThemeManager
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class ProfileUiState(
@@ -35,18 +34,36 @@ class ProfileViewModel(
     val isRelayConnected: StateFlow<Boolean> = userRepository.relayEngine?.isConnected
         ?: MutableStateFlow(false)
 
-    private val _uiState = MutableStateFlow(ProfileUiState())
+    private fun normalizeSeed(raw: String?): String {
+        val trimmed = raw?.trim().orEmpty()
+        if (trimmed.isBlank() || trimmed.startsWith("boy_", ignoreCase = true) || trimmed.startsWith("girl_", ignoreCase = true)) {
+            return "BRUTAL_1"
+        }
+        return trimmed
+    }
+
+    private val _uiState = MutableStateFlow(
+        userRepository.currentUser.value?.let { user ->
+            ProfileUiState(
+                displayName = user.displayName,
+                statusMessage = user.statusMessage,
+                selectedAvatar = normalizeSeed(user.avatarSeed)
+            )
+        } ?: ProfileUiState()
+    )
     val uiState: StateFlow<ProfileUiState> = _uiState.asStateFlow()
 
     init {
         viewModelScope.launch {
             userRepository.currentUser.collect { user ->
                 if (user != null) {
-                    _uiState.value = _uiState.value.copy(
-                        displayName = user.displayName,
-                        statusMessage = user.statusMessage,
-                        selectedAvatar = user.avatarSeed.ifBlank { "BRUTAL_1" }
-                    )
+                    _uiState.update { current ->
+                        current.copy(
+                            displayName = user.displayName,
+                            statusMessage = user.statusMessage,
+                            selectedAvatar = normalizeSeed(user.avatarSeed)
+                        )
+                    }
                 }
             }
         }
@@ -61,15 +78,15 @@ class ProfileViewModel(
     }
 
     fun onDisplayNameChange(value: String) {
-        _uiState.value = _uiState.value.copy(displayName = value, saveSuccess = false)
+        _uiState.update { it.copy(displayName = value, saveSuccess = false) }
     }
 
     fun onStatusMessageChange(value: String) {
-        _uiState.value = _uiState.value.copy(statusMessage = value, saveSuccess = false)
+        _uiState.update { it.copy(statusMessage = value, saveSuccess = false) }
     }
 
-    fun onAvatarSelect(seed: String) {
-        _uiState.value = _uiState.value.copy(selectedAvatar = seed, saveSuccess = false)
+    fun onAvatarSelect(avatarSeed: String) {
+        _uiState.update { it.copy(selectedAvatar = avatarSeed, saveSuccess = false) }
     }
 
     fun saveChanges() {

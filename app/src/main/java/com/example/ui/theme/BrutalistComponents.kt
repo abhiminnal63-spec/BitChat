@@ -10,11 +10,15 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -51,9 +55,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -144,6 +150,7 @@ fun BrutalistButton(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun BrutalistCard(
     modifier: Modifier = Modifier,
@@ -152,9 +159,21 @@ fun BrutalistCard(
     borderWidth: Dp = 2.dp,
     shadowOffset: Dp = 3.dp,
     onClick: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
     testTag: String = "brutalist_card",
     content: @Composable () -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val haptic = LocalHapticFeedback.current
+    val isInteractive = onClick != null || onLongClick != null
+    val pressOffset = if (isInteractive && isPressed && shadowOffset > 0.dp) shadowOffset / 2 else 0.dp
+    val effectiveBorderColor = if (isPressed && onLongClick != null) {
+        BrutalistTheme.colors.accent
+    } else {
+        borderColor
+    }
+
     Box(
         modifier = modifier
             .testTag(testTag)
@@ -173,12 +192,42 @@ fun BrutalistCard(
         // Main card box
         Box(
             modifier = Modifier
+                .offset(x = pressOffset, y = pressOffset)
                 .background(backgroundColor, SharpCorner)
-                .border(borderWidth, borderColor, SharpCorner)
+                .border(borderWidth, effectiveBorderColor, SharpCorner)
                 .then(
-                    if (onClick != null) {
-                        Modifier.clickable { onClick() }
-                    } else Modifier
+                    when {
+                        onClick != null && onLongClick != null -> {
+                            Modifier.combinedClickable(
+                                interactionSource = interactionSource,
+                                indication = null,
+                                onClick = { onClick() },
+                                onLongClick = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    onLongClick()
+                                }
+                            )
+                        }
+                        onClick != null -> {
+                            Modifier.clickable(
+                                interactionSource = interactionSource,
+                                indication = null,
+                                onClick = { onClick() }
+                            )
+                        }
+                        onLongClick != null -> {
+                            Modifier.combinedClickable(
+                                interactionSource = interactionSource,
+                                indication = null,
+                                onClick = {},
+                                onLongClick = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    onLongClick()
+                                }
+                            )
+                        }
+                        else -> Modifier
+                    }
                 )
         ) {
             content()
@@ -191,6 +240,7 @@ fun BrutalistAvatar(
     seedOrName: String,
     modifier: Modifier = Modifier,
     size: Dp = 48.dp,
+    avatarId: String? = null,
     imageUrl: String? = null,
     isOnline: Boolean = false,
     showOnlineBadge: Boolean = true

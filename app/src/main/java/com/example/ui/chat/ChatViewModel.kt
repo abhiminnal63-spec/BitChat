@@ -9,6 +9,7 @@ import com.example.data.model.UserEntity
 import com.example.data.realtime.RealtimeManager
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.UserRepository
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -30,6 +32,7 @@ data class ChatUiState(
     val previewImageUri: String? = null // for full screen viewer modal
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class ChatViewModel(
     val conversationId: String,
     val otherUserId: String,
@@ -49,8 +52,10 @@ class ChatViewModel(
             localSessions.any { it.id == peerId }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
-    val messages: StateFlow<List<MessageEntity>> = chatRepository.getMessagesForConversation(conversationId)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val messages: StateFlow<List<MessageEntity>> = userRepository.currentUserId
+        .flatMapLatest { uid ->
+            chatRepository.getMessagesForConversation(conversationId, uid)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val isOtherUserTyping: StateFlow<Boolean> = RealtimeManager.typingUsers
         .combine(MutableStateFlow(conversationId)) { typingMap, convId ->

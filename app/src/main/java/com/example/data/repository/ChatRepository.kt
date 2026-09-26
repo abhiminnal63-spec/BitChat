@@ -8,6 +8,7 @@ import com.example.data.firestore.FirestoreSyncManager
 import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
 import com.example.data.model.MessageStatus
+import com.example.data.model.UserConversationStateEntity
 import com.example.data.model.UserEntity
 import com.example.data.model.buildDeterministicConversationId
 import com.example.data.realtime.RealtimeManager
@@ -46,9 +47,10 @@ class ChatRepository(
     private val timestampLock = Any()
     private var lastIssuedTimestamp = 0L
 
-    private fun nextMonotonicTimestamp(): Long = synchronized(timestampLock) {
+    private fun nextMonotonicTimestamp(minFloor: Long = 0L): Long = synchronized(timestampLock) {
         val now = System.currentTimeMillis()
-        val next = if (now <= lastIssuedTimestamp) lastIssuedTimestamp + 1L else now
+        val floor = maxOf(lastIssuedTimestamp, minFloor)
+        val next = if (now <= floor) floor + 1L else now
         lastIssuedTimestamp = next
         next
     }
@@ -70,8 +72,84 @@ class ChatRepository(
         return conversationDao.getConversationsForUser(userId)
     }
 
-    fun getMessagesForConversation(conversationId: String): Flow<List<MessageEntity>> {
-        return messageDao.getMessagesForConversation(conversationId)
+    fun getMessagesForConversation(conversationId: String, userId: String? = null): Flow<List<MessageEntity>> {
+        return if (!userId.isNullOrBlank()) {
+            messageDao.getMessagesForConversationForUser(conversationId, userId)
+        } else {
+            messageDao.getMessagesForConversation(conversationId)
+        }
+    }
+
+    /**
+     * Deletes/hides a conversation ONLY for the authenticated user (`authenticatedUserId`).
+     * Does NOT delete the shared conversation document, the other participant's messages, or either user's account.
+     */
+    suspend fun deleteConversationForUser(
+        conversationId: String,
+        authenticatedUserId: String
+    ): Result<UserConversationStateEntity> = withContext(Dispatchers.IO) {
+        val cleanUid = authenticatedUserId.trim()
+        val cleanConvId = conversationId.trim()
+        if (cleanUid.isBlank() || cleanConvId.isBlank()) {
+            return@withContext Result.failure(SecurityException("Unauthenticated user cannot delete conversation"))
+        }
+
+        val existingConv = conversationDao.getConversationByIdDirect(cleanConvId)
+        if (existingConv != null) {
+            if (existingConv.participant1Id != cleanUid && existingConv.participant2Id != cleanUid) {
+                return@withContext Result.failure(
+                    SecurityException("Unauthorized: user is not a participant of conversation $cleanConvId")
+                )
+            }
+        } else {
+            val parts = cleanConvId.split("_")
+            if (!parts.contains(cleanUid)) {
+                return@withContext Result.failure(
+                    SecurityException("Unauthorized: user is not a participant of conversation $cleanConvId")
+                )
+            }
+        }
+
+        val otherUserId = if (existingConv != null) {
+            if (existingConv.participant1Id == cleanUid) existingConv.participant2Id else existingConv.participant1Id
+        } else {
+            cleanConvId.removePrefix("${cleanUid}_").removeSuffix("_$cleanUid")
+        }
+
+        val maxMsgTime = messageDao.getMaxMessageTimestampForConversation(cleanConvId) ?: 0L
+        val existingState = conversationDao.getUserConversationStateDirect(cleanUid, cleanConvId)
+        val deletedAt = nextMonotonicTimestamp(
+            maxOf(
+                existingConv?.lastMessageTimestamp ?: 0L,
+                maxMsgTime,
+                existingState?.deletedAt ?: 0L
+            )
+        )
+
+        val state = UserConversationStateEntity(
+            userId = cleanUid,
+            conversationId = cleanConvId,
+            otherUserId = otherUserId,
+            hidden = true,
+            deletedAt = deletedAt,
+            lastMessage = "",
+            lastMessageAt = 0L,
+            updatedAt = deletedAt
+        )
+        conversationDao.upsertUserConversationState(state)
+
+        if (existingConv != null) {
+            if (existingConv.participant1Id == cleanUid) {
+                conversationDao.clearUnreadForUser1(cleanConvId)
+            } else if (existingConv.participant2Id == cleanUid) {
+                conversationDao.clearUnreadForUser2(cleanConvId)
+            }
+        }
+
+        firestoreSyncManager?.syncUserConversationStateToCloud(state)
+        relayEngine?.publishUserConversationState(state)
+
+        Result.success(state)
     }
 
     fun getConversationById(conversationId: String): Flow<ConversationEntity?> {
@@ -135,9 +213,18 @@ class ChatRepository(
         attachmentSize: Long? = null,
         attachmentName: String? = null
     ): MessageEntity = withContext(Dispatchers.IO) {
-        val now = nextMonotonicTimestamp()
-        val messageId = "msg_${UUID.randomUUID().toString().replace("-", "")}"
         val canonicalConvId = buildDeterministicConversationId(senderId, recipientId)
+        val existingConv = conversationDao.getConversationByIdDirect(canonicalConvId)
+        val senderState = conversationDao.getUserConversationStateDirect(senderId, canonicalConvId)
+        val recipientState = conversationDao.getUserConversationStateDirect(recipientId, canonicalConvId)
+        val now = nextMonotonicTimestamp(
+            maxOf(
+                existingConv?.lastMessageTimestamp ?: 0L,
+                senderState?.deletedAt ?: 0L,
+                recipientState?.deletedAt ?: 0L
+            )
+        )
+        val messageId = "msg_${UUID.randomUUID().toString().replace("-", "")}"
         val isImage = !attachmentUri.isNullOrBlank() || attachmentType != null
         val msgType = if (isImage) "image" else "text"
 
@@ -166,7 +253,6 @@ class ChatRepository(
 
         // Update conversation summary immediately
         val sortedIds = listOf(senderId.trim(), recipientId.trim()).sorted()
-        val existingConv = conversationDao.getConversationByIdDirect(canonicalConvId)
         val previewText = when {
             isImage && content.isNotBlank() -> "📷 ${content.trim()}"
             isImage -> "📷 Photo"
@@ -186,6 +272,35 @@ class ChatRepository(
             updatedAt = now
         )
         conversationDao.insertConversation(updatedConv)
+
+        // Unhide conversation for sender (and recipient if present locally) while preserving their deletedAt history cutoff
+        val updatedSenderState = UserConversationStateEntity(
+            userId = senderId,
+            conversationId = canonicalConvId,
+            otherUserId = recipientId,
+            hidden = false,
+            deletedAt = senderState?.deletedAt ?: 0L,
+            lastMessage = previewText,
+            lastMessageAt = now,
+            updatedAt = now
+        )
+        conversationDao.upsertUserConversationState(updatedSenderState)
+        if (recipientState != null) {
+            conversationDao.upsertUserConversationState(
+                recipientState.copy(
+                    hidden = false,
+                    lastMessage = previewText,
+                    lastMessageAt = now,
+                    updatedAt = now
+                )
+            )
+        }
+        if (senderState != null && senderState.hidden) {
+            repoScope.launch {
+                firestoreSyncManager?.syncUserConversationStateToCloud(updatedSenderState)
+                relayEngine?.publishUserConversationState(updatedSenderState)
+            }
+        }
 
         // Dispatch to shared cloud backend sequentially per conversation so rapid messages (1..100+) never race or drop
         val job = repoScope.launch {

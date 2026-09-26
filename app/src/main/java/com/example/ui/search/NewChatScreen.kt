@@ -88,33 +88,31 @@ fun NewChatScreen(
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
 
-    val liveSearchResults by userRepository.searchUsers(
-        query = searchQuery,
-        currentUserId = currentUserId
-    ).collectAsState(initial = emptyList())
+    val liveUsers by userRepository.getAllUsersFlow().collectAsState(initial = emptyList())
+    val normalizedQuery = normalizeUsername(searchQuery)
 
-    val liveAllUsers by userRepository.getAllUsersExcept(
-        currentUserId = currentUserId
-    ).collectAsState(initial = emptyList())
+    // Query shared cloud backend in real time ONLY when a non-blank username query is entered
+    LaunchedEffect(normalizedQuery, currentUserId, isNetworkConnected, retryCounter) {
+        if (normalizedQuery.isBlank()) {
+            backendResults = emptyList()
+            backendError = null
+            isSearchingBackend = false
+            return@LaunchedEffect
+        }
 
-    // Query shared cloud backend in real time whenever searchQuery, network state, or retry changes
-    LaunchedEffect(searchQuery, currentUserId, isNetworkConnected, retryCounter) {
         if (!isNetworkConnected) {
             isSearchingBackend = false
             backendError = "Unable to search because of a network/backend error."
             return@LaunchedEffect
         }
 
-        val normalized = normalizeUsername(searchQuery)
         isSearchingBackend = true
         backendError = null
 
-        if (normalized.isNotEmpty()) {
-            delay(120L)
-        }
+        delay(100L)
 
         val result = userRepository.searchUsersInBackend(
-            rawQuery = searchQuery,
+            rawQuery = normalizedQuery,
             currentUserId = currentUserId
         )
 
@@ -131,37 +129,36 @@ fun NewChatScreen(
         )
     }
 
-    val normalizedQuery = normalizeUsername(searchQuery)
-
-    // Merge real-time backend results with live cloud-streamed Room updates (never returning current user)
-    val displayList = remember(backendResults, liveSearchResults, liveAllUsers, normalizedQuery, currentUserId, backendError) {
-        if (backendError != null) {
+    // Use ONLY shared backend results for discovery; enrich online/lastSeen status for matched backend users only
+    val displayList = remember(backendResults, liveUsers, normalizedQuery, currentUserId, backendError) {
+        if (normalizedQuery.isBlank() || backendError != null) {
             emptyList()
         } else {
+            val liveById = liveUsers.associateBy { it.id }
             val merged = linkedMapOf<String, UserEntity>()
-            val liveSource = if (normalizedQuery.isBlank()) liveAllUsers else liveSearchResults
             for (u in backendResults) {
                 if (u.id != currentUserId) {
                     val key = normalizeUsername(u.usernameNormalized.ifBlank { u.username })
-                    if (key.isNotBlank()) merged[key] = u
-                }
-            }
-            for (u in liveSource) {
-                if (u.id != currentUserId) {
-                    val key = normalizeUsername(u.usernameNormalized.ifBlank { u.username })
-                    if (key.isNotBlank() && !merged.containsKey(key)) {
-                        merged[key] = u
+                    if (key.isNotBlank()) {
+                        val live = liveById[u.id]
+                        val freshest = if (live != null && live.lastSeenTimestamp >= u.lastSeenTimestamp) {
+                            u.copy(
+                                displayName = live.displayName.ifBlank { u.displayName },
+                                avatarSeed = live.avatarSeed.ifBlank { u.avatarSeed },
+                                statusMessage = live.statusMessage.ifBlank { u.statusMessage },
+                                isOnline = live.isOnline,
+                                lastSeenTimestamp = live.lastSeenTimestamp
+                            )
+                        } else {
+                            u
+                        }
+                        merged[key] = freshest
                     }
                 }
             }
             merged.values.filter { user ->
-                if (normalizedQuery.isBlank()) {
-                    true
-                } else {
-                    user.usernameNormalized.contains(normalizedQuery) ||
-                        user.username.lowercase().contains(normalizedQuery) ||
-                        user.displayName.lowercase().contains(normalizedQuery)
-                }
+                user.usernameNormalized.contains(normalizedQuery) ||
+                    user.username.lowercase().contains(normalizedQuery)
             }.sortedWith(
                 compareBy<UserEntity> {
                     when {
@@ -225,15 +222,17 @@ fun NewChatScreen(
                             )
                         }
 
-                        IconButton(
-                            onClick = { retryCounter++ },
-                            modifier = Modifier.testTag("new_chat_refresh_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "Refresh cloud users",
-                                tint = colors.accent
-                            )
+                        if (normalizedQuery.isNotBlank()) {
+                            IconButton(
+                                onClick = { retryCounter++ },
+                                modifier = Modifier.testTag("new_chat_refresh_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "Refresh search",
+                                    tint = colors.accent
+                                )
+                            }
                         }
                     }
 
@@ -298,6 +297,51 @@ fun NewChatScreen(
 
             // Results / Status Content
             when {
+                normalizedQuery.isBlank() -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        BrutalistCard(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("discovery_neutral_card"),
+                            backgroundColor = colors.cardBackground,
+                            borderColor = colors.border,
+                            shadowOffset = 3.dp
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(20.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PersonSearch,
+                                    contentDescription = null,
+                                    tint = colors.accent,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                                Text(
+                                    text = "FIND USERS BY @USERNAME",
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 13.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = colors.textPrimary
+                                )
+                                Text(
+                                    text = "Enter a @username in the search box above to find registered accounts on the shared backend.",
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = colors.textSecondary,
+                                    lineHeight = 16.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
                 backendError != null -> {
                     Box(
                         modifier = Modifier
@@ -414,17 +458,14 @@ fun NewChatScreen(
                                     modifier = Modifier.size(36.dp)
                                 )
                                 Text(
-                                    text = "No registered user found",
+                                    text = "USER NOT FOUND",
                                     fontWeight = FontWeight.Black,
-                                    fontSize = 13.sp,
+                                    fontSize = 14.sp,
                                     fontFamily = FontFamily.Monospace,
                                     color = colors.textPrimary
                                 )
                                 Text(
-                                    text = if (normalizedQuery.isNotBlank())
-                                        "No registered account matched '@$normalizedQuery' on the shared database."
-                                    else
-                                        "No other registered accounts found yet. Register another account on a second device or via Switch / Logout.",
+                                    text = "No registered account matched '@$normalizedQuery' on the shared database.",
                                     fontSize = 11.sp,
                                     fontFamily = FontFamily.Monospace,
                                     color = colors.textSecondary,
@@ -432,7 +473,7 @@ fun NewChatScreen(
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 BrutalistButton(
-                                    text = "REFRESH CLOUD DIRECTORY",
+                                    text = "RETRY SEARCH",
                                     onClick = { retryCounter++ },
                                     backgroundColor = colors.accent,
                                     textColor = colors.accentOn,
@@ -457,10 +498,7 @@ fun NewChatScreen(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = if (normalizedQuery.isNotBlank())
-                                        "SEARCH RESULTS FOR '@$normalizedQuery' (${displayList.size})"
-                                    else
-                                        "ALL REGISTERED USERS (${displayList.size})",
+                                    text = "SEARCH RESULTS FOR '@$normalizedQuery' (${displayList.size})",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Black,
                                     fontFamily = FontFamily.Monospace,

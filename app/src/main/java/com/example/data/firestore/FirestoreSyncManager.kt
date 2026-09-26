@@ -8,6 +8,7 @@ import com.example.data.dao.UserDao
 import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
 import com.example.data.model.MessageStatus
+import com.example.data.model.UserConversationStateEntity
 import com.example.data.model.UserEntity
 import com.example.data.model.buildDeterministicConversationId
 import com.example.data.model.cleanDisplayUsername
@@ -55,7 +56,6 @@ class FirestoreSyncManager(
             if (FirebaseApp.getApps(context).isNotEmpty()) {
                 firestore = FirebaseFirestore.getInstance()
                 _isCloudConnected.value = true
-                startGlobalUsersListener()
                 Log.d(tag, "Firestore successfully initialized.")
             } else {
                 Log.w(tag, "FirebaseApp is not initialized yet. Operating with GlobalRelayEngine cloud backend.")
@@ -132,24 +132,53 @@ class FirestoreSyncManager(
     fun startSync(currentUserId: String) {
         val db = firestore ?: return
         stopSync()
-        startGlobalUsersListener()
 
         try {
-            // 1. Listen to all registered users from Firestore
-            val userReg = db.collection("users").addSnapshotListener { snapshot, error ->
-                if (error != null) {
-                    Log.e(tag, "Error listening to users: ${error.message}")
-                    return@addSnapshotListener
-                }
-                if (snapshot != null) {
-                    scope.launch {
-                        for (doc in snapshot.documents) {
-                            parseAndUpsertUserDoc(doc)
+            // 1. Listen to per-user conversation states: users/{uid}/conversations/{conversationId}
+            val userConvStatesReg = db.collection("users")
+                .document(currentUserId)
+                .collection("conversations")
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null) {
+                        Log.e(tag, "Error listening to user conversation states: ${error.message}")
+                        return@addSnapshotListener
+                    }
+                    if (snapshot != null) {
+                        scope.launch {
+                            for (doc in snapshot.documents) {
+                                try {
+                                    val convId = doc.getString("conversationId") ?: doc.id
+                                    if (convId.isBlank()) continue
+                                    val otherUserId = doc.getString("otherUserId") ?: ""
+                                    val hidden = doc.getBoolean("hidden") ?: false
+                                    val deletedAt = doc.getLong("deletedAt") ?: 0L
+                                    val lastMessage = doc.getString("lastMessage") ?: ""
+                                    val lastMessageAt = doc.getLong("lastMessageAt") ?: 0L
+                                    val updatedAt = doc.getLong("updatedAt") ?: deletedAt
+
+                                    val existingState = conversationDao.getUserConversationStateDirect(currentUserId, convId)
+                                    if (existingState == null || updatedAt >= existingState.updatedAt || deletedAt >= existingState.deletedAt) {
+                                        conversationDao.upsertUserConversationState(
+                                            UserConversationStateEntity(
+                                                userId = currentUserId,
+                                                conversationId = convId,
+                                                otherUserId = otherUserId,
+                                                hidden = hidden,
+                                                deletedAt = maxOf(deletedAt, existingState?.deletedAt ?: 0L),
+                                                lastMessage = lastMessage,
+                                                lastMessageAt = lastMessageAt,
+                                                updatedAt = maxOf(updatedAt, existingState?.updatedAt ?: 0L)
+                                            )
+                                        )
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(tag, "User conversation state parse error: ${e.message}")
+                                }
+                            }
                         }
                     }
                 }
-            }
-            listeners.add(userReg)
+            listeners.add(userConvStatesReg)
 
             // 2. Listen to conversations where user is a participant
             val convReg = db.collection("conversations")
@@ -463,16 +492,17 @@ class FirestoreSyncManager(
     suspend fun searchUsersInCloud(rawQuery: String, excludeUserId: String): Result<List<UserEntity>>? = withContext(Dispatchers.IO) {
         val db = firestore ?: return@withContext null
         val normQuery = normalizeUsername(rawQuery)
+        if (normQuery.isBlank()) {
+            return@withContext Result.success(emptyList())
+        }
         try {
             val snapshot = db.collection("users").get().await()
             val results = mutableListOf<UserEntity>()
             for (doc in snapshot.documents) {
                 val parsed = parseAndUpsertUserDoc(doc) ?: continue
                 if (parsed.id == excludeUserId) continue
-                if (normQuery.isBlank() ||
-                    parsed.usernameNormalized.contains(normQuery) ||
-                    parsed.username.lowercase().contains(normQuery) ||
-                    parsed.displayName.lowercase().contains(normQuery)
+                if (parsed.usernameNormalized.contains(normQuery) ||
+                    parsed.username.lowercase().contains(normQuery)
                 ) {
                     results.add(parsed)
                 }
@@ -533,6 +563,31 @@ class FirestoreSyncManager(
             db.collection("conversations").document(canonicalId).set(convMap, SetOptions.merge())
         } catch (e: Exception) {
             Log.e(tag, "Failed to sync conversation: ${e.message}")
+        }
+    }
+
+    suspend fun syncUserConversationStateToCloud(state: UserConversationStateEntity) = withContext(Dispatchers.IO) {
+        val db = firestore ?: return@withContext
+        if (state.userId.isBlank() || state.conversationId.isBlank()) return@withContext
+        try {
+            val stateMap = hashMapOf<String, Any>(
+                "conversationId" to state.conversationId,
+                "userId" to state.userId,
+                "otherUserId" to state.otherUserId,
+                "hidden" to state.hidden,
+                "deletedAt" to state.deletedAt,
+                "lastMessage" to state.lastMessage,
+                "lastMessageAt" to state.lastMessageAt,
+                "updatedAt" to state.updatedAt
+            )
+            db.collection("users")
+                .document(state.userId)
+                .collection("conversations")
+                .document(state.conversationId)
+                .set(stateMap, SetOptions.merge())
+                .await()
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to sync user conversation state: ${e.message}")
         }
     }
 

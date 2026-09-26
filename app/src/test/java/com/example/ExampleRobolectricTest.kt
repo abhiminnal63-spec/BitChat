@@ -12,9 +12,14 @@ import com.example.data.model.UserEntity
 import com.example.data.model.buildDeterministicConversationId
 import com.example.data.model.mergeMessageStatus
 import com.example.data.realtime.RealtimeManager
+import com.example.data.relay.GlobalRelayEngine
 import com.example.data.repository.ChatRepository
+import com.example.data.repository.UserRepository
+import com.example.ui.home.HomeViewModel
+import com.example.ui.profile.ProfileViewModel
 import com.example.util.DateTimeUtils
 import com.example.util.ImageUtils
+import com.example.util.ThemeManager
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -22,6 +27,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -201,6 +207,188 @@ class ExampleRobolectricTest {
 
         val centerPixel = decoded.getPixel(decoded.width / 2, decoded.height / 2)
         assertTrue("Decoded image pixel must not be pure black", Color.red(centerPixel) > 150)
+    }
+
+    @Test
+    fun `registration, duplicate check, login resilience, and profile seed update`() = runBlocking {
+        val userDao = database.userDao()
+        val relayEngine = GlobalRelayEngine(
+            userDao = userDao,
+            conversationDao = database.conversationDao(),
+            messageDao = database.messageDao()
+        )
+        val userRepo = UserRepository(
+            userDao = userDao,
+            context = context,
+            firestoreSyncManager = null,
+            relayEngine = relayEngine
+        )
+        RealtimeManager.setNetworkConnected(true)
+        val regResult = userRepo.registerUser("avatar_tester", "Avatar Tester", "pass1234")
+        assertTrue("Registration must succeed without backend error", regResult.isSuccess)
+        val registeredUser = regResult.getOrThrow()
+
+        // Duplicate registration must be rejected
+        val dupResult = userRepo.registerUser("avatar_tester", "Another User", "pass1234")
+        assertTrue("Duplicate username must be rejected", dupResult.isFailure)
+
+        // Logout and login with correct and incorrect passwords
+        userRepo.logout()
+        val wrongLogin = userRepo.loginUser("avatar_tester", "wrong_pass")
+        assertTrue("Wrong password must fail", wrongLogin.isFailure)
+
+        val validLogin = userRepo.loginUser("avatar_tester", "pass1234")
+        assertTrue("Valid password login must succeed", validLogin.isSuccess)
+
+        val themeManager = ThemeManager(context)
+        val profileVm = ProfileViewModel(userRepo, themeManager)
+
+        profileVm.onAvatarSelect("CYBER")
+        assertEquals("CYBER", profileVm.uiState.value.selectedAvatar)
+        userRepo.updateProfile(registeredUser.displayName, registeredUser.statusMessage, "CYBER")
+        val updated = userDao.getUserByIdDirect(registeredUser.id)
+        assertEquals("CYBER", updated?.avatarSeed)
+        relayEngine.stop()
+    }
+
+    @Test
+    fun `private user discovery and per-user chat deletion preserve peer account and history`() = runBlocking {
+        val userDao = database.userDao()
+        val convDao = database.conversationDao()
+        val msgDao = database.messageDao()
+
+        val relayEngine = GlobalRelayEngine(
+            userDao = userDao,
+            conversationDao = convDao,
+            messageDao = msgDao
+        )
+        val userRepo = UserRepository(
+            userDao = userDao,
+            context = context,
+            firestoreSyncManager = null,
+            relayEngine = relayEngine
+        )
+        val chatRepo = ChatRepository(
+            conversationDao = convDao,
+            messageDao = msgDao,
+            userDao = userDao,
+            firestoreSyncManager = null,
+            relayEngine = relayEngine,
+            appContext = context
+        )
+
+        // Create @brutt, @abin, @avatar_tester
+        val brutt = userRepo.registerUser("brutt", "Brutt", "pass1234").getOrThrow()
+        val abin = userRepo.registerUser("abin", "Abin", "pass1234").getOrThrow()
+        val avatarTester = userRepo.registerUser("avatar_tester", "Avatar Tester", "pass1234").getOrThrow()
+
+        // Switch active session to @brutt
+        userRepo.switchUser(brutt.id)
+        assertEquals(brutt.id, userRepo.currentUserId.value)
+
+        // 1. Discovery screen initially shows NO users when query is blank
+        val initialDiscovery = userRepo.searchUsersInBackend("", brutt.id).getOrThrow()
+        assertTrue("Discovery must not expose any users when search query is blank", initialDiscovery.isEmpty())
+        val whitespaceDiscovery = userRepo.searchUsersInBackend("   @   ", brutt.id).getOrThrow()
+        assertTrue("Discovery must not expose users for @/whitespace query", whitespaceDiscovery.isEmpty())
+
+        // 2. Search "abin", "@abin", "ABIN" -> only @abin appears
+        val searchAbinLower = userRepo.searchUsersInBackend("abin", brutt.id).getOrThrow()
+        assertEquals(1, searchAbinLower.size)
+        assertEquals("abin", searchAbinLower.first().usernameNormalized)
+
+        val searchAbinAt = userRepo.searchUsersInBackend("  @abin  ", brutt.id).getOrThrow()
+        assertEquals(1, searchAbinAt.size)
+        assertEquals("abin", searchAbinAt.first().usernameNormalized)
+
+        val searchAbinUpper = userRepo.searchUsersInBackend("ABIN", brutt.id).getOrThrow()
+        assertEquals(1, searchAbinUpper.size)
+        assertEquals("abin", searchAbinUpper.first().usernameNormalized)
+
+        // 3. Search "avatar_tester" -> only @avatar_tester appears
+        val searchAvatarTester = userRepo.searchUsersInBackend("avatar_tester", brutt.id).getOrThrow()
+        assertEquals(1, searchAvatarTester.size)
+        assertEquals("avatar_tester", searchAvatarTester.first().usernameNormalized)
+
+        // 4. Search "xyz" / "@doesnotexist" -> USER NOT FOUND (empty list)
+        val searchXyz = userRepo.searchUsersInBackend("xyz", brutt.id).getOrThrow()
+        assertTrue("Non-existent username must return empty list", searchXyz.isEmpty())
+        val searchDoesNotExist = userRepo.searchUsersInBackend("@doesnotexist", brutt.id).getOrThrow()
+        assertTrue("Non-existent @username must return empty list", searchDoesNotExist.isEmpty())
+
+        // 5. Create conversations: @brutt <-> @abin AND @abin <-> @avatar_tester
+        val convBruttAbin = chatRepo.getOrCreateConversation(brutt.id, abin.id)
+        chatRepo.sendMessage(convBruttAbin, brutt.id, abin.id, "Hello Abin from Brutt")
+        chatRepo.sendMessage(convBruttAbin, abin.id, brutt.id, "Hey Brutt!")
+
+        val convAbinTester = chatRepo.getOrCreateConversation(abin.id, avatarTester.id)
+        chatRepo.sendMessage(convAbinTester, abin.id, avatarTester.id, "Hi Avatar Tester")
+
+        val homeVm = HomeViewModel(userRepo, chatRepo, userDao)
+        val bruttConvsBefore = chatRepo.getConversationsForUser(brutt.id).first()
+        assertEquals(1, bruttConvsBefore.size)
+        assertEquals(convBruttAbin, bruttConvsBefore.first().id)
+
+        // 6. Long press @abin -> opens DELETE CHAT confirmation, Tap CANCEL -> chat remains
+        val enrichedItem = com.example.ui.home.EnrichedConversation(
+            conversation = bruttConvsBefore.first(),
+            otherUser = abin,
+            unreadCount = 0,
+            isOtherUserTyping = false
+        )
+        homeVm.requestDeleteConversation(enrichedItem)
+        assertNotNull("Confirmation dialog state must be active after long press", homeVm.uiState.value.conversationPendingDeletion)
+        homeVm.cancelDeleteConversation()
+        assertNull("Confirmation dialog must close on CANCEL", homeVm.uiState.value.conversationPendingDeletion)
+        assertEquals(1, chatRepo.getConversationsForUser(brutt.id).first().size)
+
+        // 7. Security check: @brutt cannot delete @abin's private conversation with @avatar_tester
+        val unauthorizedDelete = chatRepo.deleteConversationForUser(convAbinTester, brutt.id)
+        assertTrue("Unauthorized deletion of another user's chat must be rejected", unauthorizedDelete.isFailure)
+
+        // 8. Long press again -> confirm DELETE for @brutt
+        val deleteResult = chatRepo.deleteConversationForUser(convBruttAbin, brutt.id)
+        assertTrue("Authorized per-user chat deletion must succeed", deleteResult.isSuccess)
+
+        // @abin disappears from @brutt's CHATS immediately
+        val bruttConvsAfterDelete = chatRepo.getConversationsForUser(brutt.id).first()
+        assertTrue("@abin conversation must be removed from @brutt's CHATS", bruttConvsAfterDelete.isEmpty())
+
+        // @brutt's visible messages in that conversation are now empty
+        val bruttVisibleMessages = chatRepo.getMessagesForConversation(convBruttAbin, brutt.id).first()
+        assertTrue("@brutt's visible chat history must be cleared", bruttVisibleMessages.isEmpty())
+
+        // @abin's account still exists intact
+        val abinAccount = userDao.getUserByIdDirect(abin.id)
+        assertNotNull("@abin account must still exist", abinAccount)
+        assertEquals("abin", abinAccount?.usernameNormalized)
+
+        // @abin still sees the conversation with @brutt AND all messages
+        val abinConvs = chatRepo.getConversationsForUser(abin.id).first()
+        assertEquals("@abin must still see both conversations", 2, abinConvs.size)
+        val abinVisibleMessages = chatRepo.getMessagesForConversation(convBruttAbin, abin.id).first()
+        assertEquals("@abin must still see all 2 messages", 2, abinVisibleMessages.size)
+
+        // @abin's other conversation with @avatar_tester remains unaffected
+        val abinTesterMessages = chatRepo.getMessagesForConversation(convAbinTester, abin.id).first()
+        assertEquals(1, abinTesterMessages.size)
+
+        // 9. If @brutt starts a new conversation / sends a new message to @abin again, it becomes visible again for @brutt
+        chatRepo.sendMessage(convBruttAbin, brutt.id, abin.id, "Starting fresh after delete!")
+        val bruttConvsAfterNewMsg = chatRepo.getConversationsForUser(brutt.id).first()
+        assertEquals("Conversation must reappear for @brutt after sending a new message", 1, bruttConvsAfterNewMsg.size)
+
+        val bruttMessagesAfterNewMsg = chatRepo.getMessagesForConversation(convBruttAbin, brutt.id).first()
+        assertEquals("Only the new message after deletion should appear for @brutt", 1, bruttMessagesAfterNewMsg.size)
+        assertEquals("Starting fresh after delete!", bruttMessagesAfterNewMsg.first().content)
+
+        // Meanwhile @abin sees all 3 messages
+        val abinMessagesAfterNewMsg = chatRepo.getMessagesForConversation(convBruttAbin, abin.id).first()
+        assertEquals(3, abinMessagesAfterNewMsg.size)
+
+        chatRepo.flushPendingMessages(convBruttAbin)
+        chatRepo.flushPendingMessages(convAbinTester)
+        relayEngine.stop()
     }
 }
 

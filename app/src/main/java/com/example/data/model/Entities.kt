@@ -29,7 +29,7 @@ data class UserEntity(
     val usernameNormalized: String = normalizeUsername(username),
     val displayName: String,
     val passwordHash: String = "",
-    val avatarSeed: String = "",
+    val avatarSeed: String = "BRUTAL_1",
     val statusMessage: String = "Using Easapp",
     val isOnline: Boolean = false,
     val lastSeenTimestamp: Long = System.currentTimeMillis(),
@@ -53,6 +53,25 @@ data class ConversationEntity(
     val lastMessageStatus: String = "SENT",
     val unreadCountForUser1: Int = 0,
     val unreadCountForUser2: Int = 0,
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "user_conversation_states",
+    primaryKeys = ["userId", "conversationId"],
+    indices = [
+        Index(value = ["userId"]),
+        Index(value = ["conversationId"])
+    ]
+)
+data class UserConversationStateEntity(
+    val userId: String,
+    val conversationId: String,
+    val otherUserId: String,
+    val hidden: Boolean = false,
+    val deletedAt: Long = 0L,
+    val lastMessage: String = "",
+    val lastMessageAt: Long = 0L,
     val updatedAt: Long = System.currentTimeMillis()
 )
 

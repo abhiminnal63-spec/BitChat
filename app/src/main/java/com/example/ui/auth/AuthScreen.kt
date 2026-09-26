@@ -473,6 +473,7 @@ fun AuthScreen(
                                 ) {
                                     BrutalistAvatar(
                                         seedOrName = user.displayName,
+                                        avatarId = user.avatarSeed,
                                         size = 32.dp,
                                         isOnline = user.isOnline
                                     )

@@ -24,7 +24,11 @@ import okhttp3.Request
 
 object ImageUtils {
 
-    private val bitmapCache = object : LruCache<String, Bitmap>(24 * 1024) { // 24 MB cache
+    private val maxCacheKb = ((Runtime.getRuntime().maxMemory() / 1024L) / 8L)
+        .toInt()
+        .coerceIn(4 * 1024, 16 * 1024)
+
+    private val bitmapCache = object : LruCache<String, Bitmap>(maxCacheKb) {
         override fun sizeOf(key: String, value: Bitmap): Int {
             return (value.byteCount / 1024).coerceAtLeast(1)
         }

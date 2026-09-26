@@ -34,7 +34,8 @@ data class HomeUiState(
     val searchQuery: String = "",
     val isSwitchUserDialogVisible: Boolean = false,
     val isSearchingBackend: Boolean = false,
-    val searchErrorMessage: String? = null
+    val searchErrorMessage: String? = null,
+    val conversationPendingDeletion: EnrichedConversation? = null
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -54,11 +55,12 @@ class HomeViewModel(
     val isNetworkConnected: StateFlow<Boolean> = RealtimeManager.isNetworkConnected
 
     init {
-        // Proactively query the shared cloud backend when session starts
         viewModelScope.launch {
             userRepository.currentUserId.collect { uid ->
-                if (!uid.isNullOrBlank()) {
+                if (!uid.isNullOrBlank() && normalizeUsername(_uiState.value.searchQuery).isNotBlank()) {
                     triggerBackendSearch(_uiState.value.searchQuery, immediate = true)
+                } else {
+                    _backendSearchResults.value = emptyList()
                 }
             }
         }
@@ -72,7 +74,7 @@ class HomeViewModel(
             initialValue = emptyList()
         )
 
-    // Reactive conversations list backed by shared cloud conversations
+    // Reactive conversations list backed by shared cloud conversations and per-user deletion state
     val conversationsList: StateFlow<List<EnrichedConversation>> = userRepository.currentUserId
         .flatMapLatest { userId ->
             if (userId == null) {
@@ -86,8 +88,13 @@ class HomeViewModel(
                     _uiState
                 ) { rawConversations, allUsers, backendUsers, typingMap, state ->
                     val userMap = linkedMapOf<String, UserEntity>()
-                    for (u in allUsers) userMap[u.id] = u
                     for (u in backendUsers) userMap[u.id] = u
+                    for (u in allUsers) {
+                        val existing = userMap[u.id]
+                        if (existing == null || u.lastSeenTimestamp >= existing.lastSeenTimestamp) {
+                            userMap[u.id] = u
+                        }
+                    }
 
                     rawConversations
                         .filter { it.lastMessageText.isNotBlank() || it.lastMessageTimestamp > 0L }
@@ -132,44 +139,47 @@ class HomeViewModel(
             }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Shared cloud DIRECTORY users (queries backend users collection, never local sessions)
+    // Shared cloud user search results — ONLY populated when the user searches a non-blank username
     val directoryUsers: StateFlow<List<UserEntity>> = combine(
         userRepository.currentUserId,
         userDao.getAllUsersFlow(),
         _backendSearchResults,
         _uiState
     ) { currentId, allUsers, backendUsers, state ->
-        if (state.searchErrorMessage != null) {
+        val normQ = normalizeUsername(state.searchQuery)
+        if (normQ.isBlank() || state.searchErrorMessage != null) {
             emptyList()
         } else {
-            val normQ = normalizeUsername(state.searchQuery)
+            val liveById = allUsers.associateBy { it.id }
             val merged = linkedMapOf<String, UserEntity>()
             for (u in backendUsers) {
                 if (u.id != currentId) {
                     val key = normalizeUsername(u.usernameNormalized.ifBlank { u.username })
-                    if (key.isNotBlank()) merged[key] = u
-                }
-            }
-            for (u in allUsers) {
-                if (u.id != currentId) {
-                    val key = normalizeUsername(u.usernameNormalized.ifBlank { u.username })
-                    if (key.isNotBlank() && !merged.containsKey(key)) {
-                        merged[key] = u
+                    if (key.isNotBlank()) {
+                        val live = liveById[u.id]
+                        val freshest = if (live != null && live.lastSeenTimestamp >= u.lastSeenTimestamp) {
+                            u.copy(
+                                displayName = live.displayName.ifBlank { u.displayName },
+                                avatarSeed = live.avatarSeed.ifBlank { u.avatarSeed },
+                                statusMessage = live.statusMessage.ifBlank { u.statusMessage },
+                                isOnline = live.isOnline,
+                                lastSeenTimestamp = live.lastSeenTimestamp
+                            )
+                        } else {
+                            u
+                        }
+                        merged[key] = freshest
                     }
                 }
             }
             merged.values.filter { user ->
-                if (normQ.isBlank()) true
-                else {
-                    user.usernameNormalized.contains(normQ) ||
-                        user.username.lowercase().contains(normQ) ||
-                        user.displayName.lowercase().contains(normQ)
-                }
+                user.usernameNormalized.contains(normQ) ||
+                    user.username.lowercase().contains(normQ)
             }.sortedWith(
                 compareBy<UserEntity> {
                     when {
-                        normQ.isNotBlank() && it.usernameNormalized == normQ -> 0
-                        normQ.isNotBlank() && it.usernameNormalized.startsWith(normQ) -> 1
+                        it.usernameNormalized == normQ -> 0
+                        it.usernameNormalized.startsWith(normQ) -> 1
                         else -> 2
                     }
                 }.thenByDescending { it.isOnline }.thenBy { it.displayName.lowercase() }
@@ -179,7 +189,7 @@ class HomeViewModel(
 
     fun setActiveTab(index: Int) {
         _uiState.value = _uiState.value.copy(activeTab = index)
-        if (index == 1) {
+        if (index == 1 && normalizeUsername(_uiState.value.searchQuery).isNotBlank()) {
             triggerBackendSearch(_uiState.value.searchQuery, immediate = true)
         }
     }
@@ -199,6 +209,14 @@ class HomeViewModel(
     private fun triggerBackendSearch(rawQuery: String, immediate: Boolean = false) {
         searchJob?.cancel()
         val normQ = normalizeUsername(rawQuery)
+        if (normQ.isBlank()) {
+            _backendSearchResults.value = emptyList()
+            _uiState.value = _uiState.value.copy(
+                isSearchingBackend = false,
+                searchErrorMessage = null
+            )
+            return
+        }
 
         searchJob = viewModelScope.launch {
             if (!RealtimeManager.isNetworkConnected.value) {
@@ -214,7 +232,7 @@ class HomeViewModel(
                 searchErrorMessage = null
             )
 
-            if (!immediate && normQ.isNotEmpty()) {
+            if (!immediate) {
                 delay(120L)
             }
 
@@ -234,6 +252,37 @@ class HomeViewModel(
                         searchErrorMessage = "Unable to search because of a network/backend error."
                     )
                 }
+            )
+        }
+    }
+
+    fun requestDeleteConversation(item: EnrichedConversation) {
+        _uiState.value = _uiState.value.copy(conversationPendingDeletion = item)
+    }
+
+    fun cancelDeleteConversation() {
+        _uiState.value = _uiState.value.copy(conversationPendingDeletion = null)
+    }
+
+    fun confirmDeleteConversation() {
+        val target = _uiState.value.conversationPendingDeletion ?: return
+        val authenticatedUid = userRepository.currentUserId.value ?: return
+        _uiState.value = _uiState.value.copy(conversationPendingDeletion = null)
+        viewModelScope.launch {
+            chatRepository.deleteConversationForUser(
+                conversationId = target.conversation.id,
+                authenticatedUserId = authenticatedUid
+            )
+        }
+    }
+
+    fun deleteConversationById(conversationId: String) {
+        val authenticatedUid = userRepository.currentUserId.value ?: return
+        _uiState.value = _uiState.value.copy(conversationPendingDeletion = null)
+        viewModelScope.launch {
+            chatRepository.deleteConversationForUser(
+                conversationId = conversationId,
+                authenticatedUserId = authenticatedUid
             )
         }
     }

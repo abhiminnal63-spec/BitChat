@@ -11,15 +11,17 @@ import com.example.data.dao.MessageDao
 import com.example.data.dao.UserDao
 import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
+import com.example.data.model.UserConversationStateEntity
 import com.example.data.model.UserEntity
 
 @Database(
     entities = [
         UserEntity::class,
         ConversationEntity::class,
-        MessageEntity::class
+        MessageEntity::class,
+        UserConversationStateEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class EasappDatabase : RoomDatabase() {
@@ -48,6 +50,28 @@ abstract class EasappDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `user_conversation_states` (
+                        `userId` TEXT NOT NULL,
+                        `conversationId` TEXT NOT NULL,
+                        `otherUserId` TEXT NOT NULL,
+                        `hidden` INTEGER NOT NULL DEFAULT 0,
+                        `deletedAt` INTEGER NOT NULL DEFAULT 0,
+                        `lastMessage` TEXT NOT NULL DEFAULT '',
+                        `lastMessageAt` INTEGER NOT NULL DEFAULT 0,
+                        `updatedAt` INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(`userId`, `conversationId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_user_conversation_states_userId` ON `user_conversation_states` (`userId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_user_conversation_states_conversationId` ON `user_conversation_states` (`conversationId`)")
+            }
+        }
+
         fun getInstance(context: Context): EasappDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -55,7 +79,8 @@ abstract class EasappDatabase : RoomDatabase() {
                     EasappDatabase::class.java,
                     "easapp_database.db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+                    .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

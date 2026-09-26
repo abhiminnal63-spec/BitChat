@@ -50,7 +50,9 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.example.data.model.UserEntity
+import com.example.data.model.normalizeUsername
 import com.example.ui.theme.BrutalistAvatar
 import com.example.ui.theme.BrutalistBadge
 import com.example.ui.theme.BrutalistBlack
@@ -198,6 +200,7 @@ fun HomeScreen(
                             ) {
                                 BrutalistAvatar(
                                     seedOrName = currentUser?.displayName ?: "ME",
+                                    avatarId = currentUser?.avatarSeed,
                                     size = 38.dp,
                                     isOnline = true,
                                     showOnlineBadge = false
@@ -307,7 +310,7 @@ fun HomeScreen(
                     .weight(1f)
                     .fillMaxWidth()
             ) {
-                val isSearchActive = uiState.searchQuery.isNotBlank()
+                val isSearchActive = normalizeUsername(uiState.searchQuery).isNotBlank()
                 if (uiState.activeTab == 0) {
                     // CONVERSATIONS & REALTIME USERNAME SEARCH TAB
                     when {
@@ -432,6 +435,9 @@ fun HomeScreen(
                                             currentUserId = currentUser?.id ?: "",
                                             onClick = {
                                                 onNavigateToChat(item.conversation.id, item.otherUser.id)
+                                            },
+                                            onLongClick = {
+                                                viewModel.requestDeleteConversation(item)
                                             }
                                         )
                                     }
@@ -548,6 +554,7 @@ fun HomeScreen(
                             ) {
                                 BrutalistAvatar(
                                     seedOrName = user.displayName,
+                                    avatarId = user.avatarSeed,
                                     size = 36.dp,
                                     isOnline = user.isOnline
                                 )
@@ -622,6 +629,106 @@ fun HomeScreen(
                 containerColor = colors.cardBackground
             )
         }
+
+        // Long-Press Delete Chat Confirmation Dialog
+        val pendingDelete = uiState.conversationPendingDeletion
+        if (pendingDelete != null) {
+            Dialog(onDismissRequest = { viewModel.cancelDeleteConversation() }) {
+                BrutalistCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundColor = colors.cardBackground,
+                    borderColor = colors.border,
+                    borderWidth = 2.5.dp,
+                    shadowOffset = 5.dp,
+                    testTag = "delete_chat_dialog"
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        // Brutalist Header Banner
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(EasappSecondary, SharpCorner)
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        ) {
+                            Text(
+                                text = "DELETE CHAT?",
+                                fontWeight = FontWeight.Black,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 16.sp,
+                                color = BrutalistWhite
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(2.dp)
+                                .background(colors.border)
+                        )
+
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .background(colors.inputBackground, SharpCorner)
+                                    .border(1.5.dp, colors.border, SharpCorner)
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = "TARGET: @${pendingDelete.otherUser.username}",
+                                    fontWeight = FontWeight.Black,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 12.sp,
+                                    color = colors.textPrimary
+                                )
+                            }
+
+                            Text(
+                                text = "This will remove this conversation from your chat list.",
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.textPrimary,
+                                lineHeight = 18.sp
+                            )
+
+                            Spacer(modifier = Modifier.height(4.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                BrutalistButton(
+                                    text = "CANCEL",
+                                    onClick = { viewModel.cancelDeleteConversation() },
+                                    modifier = Modifier.weight(1f),
+                                    backgroundColor = colors.cardBackground,
+                                    textColor = colors.textPrimary,
+                                    borderColor = colors.border,
+                                    shadowOffset = 3.dp,
+                                    testTag = "button_cancel_delete_chat"
+                                )
+
+                                BrutalistButton(
+                                    text = "DELETE",
+                                    onClick = { viewModel.confirmDeleteConversation() },
+                                    modifier = Modifier.weight(1f),
+                                    backgroundColor = EasappSecondary,
+                                    textColor = BrutalistWhite,
+                                    borderColor = colors.border,
+                                    shadowOffset = 3.dp,
+                                    testTag = "button_confirm_delete_chat"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -629,7 +736,8 @@ fun HomeScreen(
 fun ConversationListItem(
     item: EnrichedConversation,
     currentUserId: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null
 ) {
     val colors = com.example.ui.theme.BrutalistTheme.colors
     val isSenderMe = item.conversation.lastMessageSenderId == currentUserId
@@ -645,6 +753,7 @@ fun ConversationListItem(
         borderColor = colors.border,
         shadowOffset = 3.dp,
         onClick = onClick,
+        onLongClick = onLongClick,
         testTag = "conv_item_${item.otherUser.username}"
     ) {
         Row(
@@ -656,6 +765,7 @@ fun ConversationListItem(
             // Avatar
             BrutalistAvatar(
                 seedOrName = item.otherUser.displayName,
+                avatarId = item.otherUser.avatarSeed,
                 size = 48.dp,
                 isOnline = isPeerOnline
             )
@@ -780,6 +890,7 @@ fun DirectoryUserItem(
         ) {
             BrutalistAvatar(
                 seedOrName = user.displayName,
+                avatarId = user.avatarSeed,
                 size = 46.dp,
                 isOnline = isUserOnline
             )
@@ -869,7 +980,7 @@ fun EmptyConversationsState(
                     )
                 }
                 Text(
-                    text = if (hasSearchQuery) "No registered user found" else "ZERO CONVERSATIONS DETECTED",
+                    text = if (hasSearchQuery) "USER NOT FOUND" else "ZERO CONVERSATIONS DETECTED",
                     fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 14.sp,
@@ -877,7 +988,7 @@ fun EmptyConversationsState(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 BrutalistButton(
-                    text = "EXPLORE REGISTERED USERS ->",
+                    text = "START NEW CHAT // DISCOVERY ->",
                     onClick = onExploreUsers,
                     backgroundColor = colors.accent,
                     textColor = colors.accentOn,
@@ -912,14 +1023,14 @@ fun EmptyDirectoryState(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = if (hasSearchQuery) "No registered user found" else "YOU ARE THE FIRST USER",
+                    text = if (hasSearchQuery) "USER NOT FOUND" else "SEARCH BY @USERNAME",
                     fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 14.sp,
                     color = colors.textPrimary
                 )
                 Text(
-                    text = "To test peer-to-peer real-time communication, register a second account (e.g. Account B) using the SWITCH menu at the top right, then search and send messages between both!",
+                    text = "Enter a @username in the search bar above to discover users on the shared backend.",
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     color = colors.textSecondary,

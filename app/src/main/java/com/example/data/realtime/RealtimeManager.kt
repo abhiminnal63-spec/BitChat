@@ -43,7 +43,17 @@ object RealtimeManager {
                 ?: return
             val activeNet = cm.activeNetwork
             val caps = activeNet?.let { cm.getNetworkCapabilities(it) }
-            osNetworkAvailable = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            val anyNetHasInternet = cm.allNetworks.any { net ->
+                cm.getNetworkCapabilities(net)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            }
+            osNetworkAvailable = if (activeNet != null && caps != null) {
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) || anyNetHasInternet
+            } else {
+                true
+            }
+            if (!osNetworkAvailable && cm.allNetworks.isEmpty()) {
+                osNetworkAvailable = true
+            }
             updateEffectiveNetworkState()
 
             val request = NetworkRequest.Builder()
@@ -61,7 +71,11 @@ object RealtimeManager {
                     override fun onLost(network: Network) {
                         val currentActive = cm.activeNetwork
                         val currentCaps = currentActive?.let { cm.getNetworkCapabilities(it) }
-                        osNetworkAvailable = currentCaps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+                        val stillConnected = currentCaps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true ||
+                            cm.allNetworks.any { net ->
+                                cm.getNetworkCapabilities(net)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+                            }
+                        osNetworkAvailable = stillConnected || currentActive == null
                         updateEffectiveNetworkState()
                     }
                 }
@@ -76,6 +90,9 @@ object RealtimeManager {
     }
 
     fun setNetworkConnected(connected: Boolean) {
+        if (connected) {
+            osNetworkAvailable = true
+        }
         manualOfflineOverride = !connected
         updateEffectiveNetworkState()
     }

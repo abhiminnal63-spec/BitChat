@@ -8,6 +8,7 @@ import androidx.room.Transaction
 import androidx.room.Update
 import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
+import com.example.data.model.UserConversationStateEntity
 import com.example.data.model.UserEntity
 import com.example.data.model.mergeMessageStatus
 import com.example.data.model.normalizeUsername
@@ -28,10 +29,10 @@ interface UserDao {
         """
         SELECT * FROM users 
         WHERE id != :excludeId 
+        AND LOWER(TRIM(:normalizedQuery)) != ''
         AND (
             usernameNormalized LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%' 
-            OR LOWER(username) LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%' 
-            OR LOWER(displayName) LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%'
+            OR LOWER(username) LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%'
         ) 
         ORDER BY 
             CASE WHEN usernameNormalized = LOWER(TRIM(:normalizedQuery)) THEN 0
@@ -47,10 +48,10 @@ interface UserDao {
         """
         SELECT * FROM users 
         WHERE id != :excludeId 
+        AND LOWER(TRIM(:normalizedQuery)) != ''
         AND (
             usernameNormalized LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%' 
-            OR LOWER(username) LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%' 
-            OR LOWER(displayName) LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%'
+            OR LOWER(username) LIKE '%' || LOWER(TRIM(:normalizedQuery)) || '%'
         ) 
         ORDER BY 
             CASE WHEN usernameNormalized = LOWER(TRIM(:normalizedQuery)) THEN 0
@@ -99,7 +100,27 @@ interface UserDao {
         val now = System.currentTimeMillis()
         val keepExistingPresence = existingById != null &&
             existingById.lastSeenTimestamp > 0L &&
-            (!allowPresenceUpdate || remoteUser.lastSeenTimestamp < existingById.lastSeenTimestamp)
+            (!allowPresenceUpdate || remoteUser.lastSeenTimestamp <= existingById.lastSeenTimestamp)
+
+        val keepExistingProfileFields = existingById != null &&
+            existingById.lastSeenTimestamp > 0L &&
+            (!allowPresenceUpdate || remoteUser.lastSeenTimestamp <= existingById.lastSeenTimestamp)
+
+        val finalDisplayName = if (keepExistingProfileFields && existingById!!.displayName.isNotBlank()) {
+            existingById.displayName
+        } else {
+            remoteUser.displayName
+        }
+        val finalAvatarSeed = if (keepExistingProfileFields && existingById!!.avatarSeed.isNotBlank()) {
+            existingById.avatarSeed
+        } else {
+            remoteUser.avatarSeed.ifBlank { existingById?.avatarSeed ?: "BRUTAL_1" }
+        }
+        val finalStatusMessage = if (keepExistingProfileFields && existingById!!.statusMessage.isNotBlank()) {
+            existingById.statusMessage
+        } else {
+            remoteUser.statusMessage
+        }
 
         val finalLastSeen = if (keepExistingPresence) {
             existingById!!.lastSeenTimestamp
@@ -117,6 +138,9 @@ interface UserDao {
             remoteUser.copy(
                 username = remoteUser.username.trim().removePrefix("@").trim(),
                 usernameNormalized = norm,
+                displayName = finalDisplayName,
+                avatarSeed = finalAvatarSeed,
+                statusMessage = finalStatusMessage,
                 passwordHash = preservedHash,
                 isOnline = finalOnline,
                 lastSeenTimestamp = finalLastSeen
@@ -146,7 +170,17 @@ interface UserDao {
 
 @Dao
 interface ConversationDao {
-    @Query("SELECT * FROM conversations WHERE participant1Id = :userId OR participant2Id = :userId ORDER BY updatedAt DESC")
+    @Query(
+        """
+        SELECT c.* FROM conversations c
+        LEFT JOIN user_conversation_states ucs
+          ON ucs.conversationId = c.id AND ucs.userId = :userId
+        WHERE (c.participant1Id = :userId OR c.participant2Id = :userId)
+          AND (ucs.hidden IS NULL OR ucs.hidden = 0 OR c.lastMessageTimestamp > ucs.deletedAt)
+          AND (ucs.deletedAt IS NULL OR c.lastMessageTimestamp > ucs.deletedAt)
+        ORDER BY c.updatedAt DESC
+        """
+    )
     fun getConversationsForUser(userId: String): Flow<List<ConversationEntity>>
 
     @Query("SELECT * FROM conversations WHERE id = :id")
@@ -172,12 +206,36 @@ interface ConversationDao {
 
     @Query("UPDATE conversations SET lastMessageStatus = :status WHERE id = :conversationId")
     suspend fun updateLastMessageStatus(conversationId: String, status: String)
+
+    @Query("SELECT * FROM user_conversation_states WHERE userId = :userId AND conversationId = :conversationId LIMIT 1")
+    suspend fun getUserConversationStateDirect(userId: String, conversationId: String): UserConversationStateEntity?
+
+    @Query("SELECT * FROM user_conversation_states WHERE userId = :userId")
+    fun getUserConversationStatesFlow(userId: String): Flow<List<UserConversationStateEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertUserConversationState(state: UserConversationStateEntity)
 }
 
 @Dao
 interface MessageDao {
     @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY timestamp ASC, id ASC")
     fun getMessagesForConversation(conversationId: String): Flow<List<MessageEntity>>
+
+    @Query(
+        """
+        SELECT m.* FROM messages m
+        LEFT JOIN user_conversation_states ucs
+          ON ucs.conversationId = m.conversationId AND ucs.userId = :userId
+        WHERE m.conversationId = :conversationId
+          AND (ucs.deletedAt IS NULL OR m.timestamp > ucs.deletedAt)
+        ORDER BY m.timestamp ASC, m.id ASC
+        """
+    )
+    fun getMessagesForConversationForUser(conversationId: String, userId: String): Flow<List<MessageEntity>>
+
+    @Query("SELECT MAX(timestamp) FROM messages WHERE conversationId = :conversationId")
+    suspend fun getMaxMessageTimestampForConversation(conversationId: String): Long?
 
     @Query("SELECT * FROM messages WHERE id = :messageId LIMIT 1")
     suspend fun getMessageByIdDirect(messageId: String): MessageEntity?
@@ -247,6 +305,16 @@ interface MessageDao {
     @Query("UPDATE messages SET status = :status WHERE conversationId = :conversationId AND status != 'READ'")
     suspend fun markAllInConversationAsRead(conversationId: String, status: String = "READ")
 
-    @Query("SELECT COUNT(*) FROM messages WHERE conversationId = :conversationId AND recipientId = :recipientId AND status != 'READ'")
+    @Query(
+        """
+        SELECT COUNT(*) FROM messages m
+        LEFT JOIN user_conversation_states ucs
+          ON ucs.conversationId = m.conversationId AND ucs.userId = :recipientId
+        WHERE m.conversationId = :conversationId
+          AND m.recipientId = :recipientId
+          AND m.status != 'READ'
+          AND (ucs.deletedAt IS NULL OR m.timestamp > ucs.deletedAt)
+        """
+    )
     suspend fun getUnreadCount(conversationId: String, recipientId: String): Int
 }

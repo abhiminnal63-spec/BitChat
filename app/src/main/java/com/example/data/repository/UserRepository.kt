@@ -57,6 +57,11 @@ class UserRepository(
 
         val storedId = _currentUserId.value
         val storedProfileJson = prefs.getString("logged_in_user_profile_json", null)
+        if (storedId != null && !storedProfileJson.isNullOrBlank()) {
+            parseStoredSessionUser(storedProfileJson)?.let { cachedUser ->
+                _currentUser.value = cachedUser
+            }
+        }
         if (storedId != null) {
             scope.launch {
                 var user = userDao.getUserByIdDirect(storedId)
@@ -69,13 +74,27 @@ class UserRepository(
 
                 if (user != null) {
                     val now = System.currentTimeMillis()
-                    val norm = normalizeUsername(user.usernameNormalized.ifBlank { user.username })
-                    val clean = cleanDisplayUsername(user.username)
-                    val activeUser = user.copy(
+                    val latestCurrent = _currentUser.value
+                    val effectiveUser = if (latestCurrent != null &&
+                        latestCurrent.id == user.id &&
+                        latestCurrent.lastSeenTimestamp >= user.lastSeenTimestamp
+                    ) {
+                        user.copy(
+                            displayName = latestCurrent.displayName,
+                            avatarSeed = latestCurrent.avatarSeed,
+                            statusMessage = latestCurrent.statusMessage,
+                            lastSeenTimestamp = maxOf(now, latestCurrent.lastSeenTimestamp)
+                        )
+                    } else {
+                        user
+                    }
+                    val norm = normalizeUsername(effectiveUser.usernameNormalized.ifBlank { effectiveUser.username })
+                    val clean = cleanDisplayUsername(effectiveUser.username)
+                    val activeUser = effectiveUser.copy(
                         username = clean,
                         usernameNormalized = norm,
                         isOnline = true,
-                        lastSeenTimestamp = now
+                        lastSeenTimestamp = maxOf(now, effectiveUser.lastSeenTimestamp)
                     )
                     userDao.insertUser(activeUser)
                     _currentUser.value = activeUser
@@ -263,30 +282,26 @@ class UserRepository(
             return@withContext Result.failure(IllegalArgumentException("Password must be at least 4 characters"))
         }
 
-        // 4. Check the shared cloud backend for an existing usernameNormalized
+        val passwordHash = hashPassword(rawPassword)
+        val authVerifier = computeAuthVerifier(usernameNormalized, rawPassword)
+
+        // 4. Check local DB for an existing registered local account with password
+        val localExisting = userDao.getUserByUsername(usernameNormalized)
+        if (localExisting != null && localExisting.passwordHash.isNotBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Username @$usernameNormalized is already registered"))
+        }
+
         val (firestoreExisting, relayExisting) = coroutineScope {
             val fsDeferred = async { firestoreSyncManager?.checkUsernameExistsInCloud(usernameNormalized) }
             val relayDeferred = async { relayEngine?.checkUsernameExistsInCloud(usernameNormalized) }
             fsDeferred.await() to relayDeferred.await()
         }
 
-        if (firestoreExisting == null && relayExisting?.isFailure == true) {
-            return@withContext Result.failure(
-                relayExisting.exceptionOrNull() ?: IOException("Unable to reach shared backend to verify username uniqueness.")
-            )
-        }
+        val cloudExisting = relayExisting?.getOrNull() ?: firestoreExisting?.getOrNull()
 
-        // 5. Reject the registration if it already exists on the shared backend
-        if (firestoreExisting?.getOrNull() != null || relayExisting?.getOrNull() != null) {
-            return@withContext Result.failure(IllegalArgumentException("Username @$usernameNormalized is already registered"))
-        }
-
-        // 6. Generate permanent backend UID and cryptographic auth verifier
-        val backendUid = "uid_${UUID.randomUUID().toString().replace("-", "")}"
-        val passwordHash = hashPassword(rawPassword)
-        val authVerifier = computeAuthVerifier(usernameNormalized, rawPassword)
-        val defaultAvatars = listOf("BRUTAL_1", "BRUTAL_2", "BRUTAL_3", "BRUTAL_4", "BRUTAL_5")
-        val avatarSeed = defaultAvatars[usernameNormalized.hashCode().let { kotlin.math.abs(it) % defaultAvatars.size }]
+        // 5. Generate permanent backend UID (or reuse existing cloud UID for cross-device identity continuity)
+        val backendUid = cloudExisting?.id ?: "uid_${UUID.randomUUID().toString().replace("-", "")}"
+        val avatarSeed = cloudExisting?.avatarSeed?.takeIf { it.isNotBlank() } ?: "BRUTAL_${(1..5).random()}"
         val now = System.currentTimeMillis()
 
         val newUser = UserEntity(
@@ -302,18 +317,15 @@ class UserRepository(
             createdAt = now
         )
 
-        // Publish to the shared cloud backend first so the backend is the source of truth
-        firestoreSyncManager?.syncUserToCloud(newUser, authVerifier)
-        val publishedOk = relayEngine?.publishUserSync(newUser, isNew = true, authVerifier = authVerifier) ?: true
-        if (!publishedOk && firestoreSyncManager?.isCloudConnected?.value != true) {
-            return@withContext Result.failure(IOException("Failed to register account on the shared cloud backend. Check your connection."))
-        }
-
+        // Persist locally first and set session, then publish to shared cloud backend
         userDao.insertUser(newUser)
+        setSession(newUser, authVerifier)
+
+        firestoreSyncManager?.syncUserToCloud(newUser, authVerifier)
+        relayEngine?.publishUserSync(newUser, isNew = true, authVerifier = authVerifier)
         firestoreSyncManager?.startSync(newUser.id)
         relayEngine?.start(newUser.id)
 
-        setSession(newUser, authVerifier)
         Result.success(newUser)
     }
 
@@ -330,15 +342,36 @@ class UserRepository(
         val expectedVerifier = computeAuthVerifier(usernameNormalized, rawPassword)
         val expectedHash = hashPassword(rawPassword)
 
-        // Authenticate against the shared cloud backend
+        // Authenticate against the shared cloud backend and local persistence
         val (fsAuthResult, relayAuthResult) = coroutineScope {
             val fsDef = async { firestoreSyncManager?.authenticateUserInCloud(usernameNormalized, expectedVerifier) }
             val relayDef = async { relayEngine?.authenticateUserInCloud(usernameNormalized, expectedVerifier) }
             fsDef.await() to relayDef.await()
         }
 
-        val cloudUser = relayAuthResult?.getOrNull() ?: fsAuthResult?.getOrNull()
-        if (cloudUser == null) {
+        var authenticatedUser = relayAuthResult?.getOrNull() ?: fsAuthResult?.getOrNull()
+        val localUser = userDao.getUserByUsername(usernameNormalized)
+        if (authenticatedUser == null) {
+            if (localUser != null) {
+                val savedVerifier = _localSessionVerifiers.value[localUser.id]
+                val passwordMatches = (localUser.passwordHash.isNotBlank() && localUser.passwordHash == expectedHash) ||
+                    (!savedVerifier.isNullOrBlank() && savedVerifier == expectedVerifier)
+                val hasStoredCredentials = localUser.passwordHash.isNotBlank() || !savedVerifier.isNullOrBlank()
+                if (hasStoredCredentials && !passwordMatches) {
+                    return@withContext Result.failure(IllegalArgumentException("Incorrect password for @$usernameNormalized"))
+                }
+                authenticatedUser = localUser
+            }
+        } else if (localUser != null && localUser.id == authenticatedUser.id && localUser.lastSeenTimestamp >= authenticatedUser.lastSeenTimestamp) {
+            authenticatedUser = authenticatedUser.copy(
+                displayName = localUser.displayName.ifBlank { authenticatedUser.displayName },
+                avatarSeed = localUser.avatarSeed.ifBlank { authenticatedUser.avatarSeed },
+                statusMessage = localUser.statusMessage.ifBlank { authenticatedUser.statusMessage },
+                lastSeenTimestamp = localUser.lastSeenTimestamp
+            )
+        }
+
+        if (authenticatedUser == null) {
             val err = relayAuthResult?.exceptionOrNull()
                 ?: fsAuthResult?.exceptionOrNull()
                 ?: IllegalArgumentException("No registered user found with @$usernameNormalized")
@@ -346,9 +379,9 @@ class UserRepository(
         }
 
         val now = System.currentTimeMillis()
-        val updatedUser = cloudUser.copy(
-            username = cleanDisplayUsername(cloudUser.username),
-            usernameNormalized = normalizeUsername(cloudUser.usernameNormalized.ifBlank { cloudUser.username }),
+        val updatedUser = authenticatedUser.copy(
+            username = cleanDisplayUsername(authenticatedUser.username),
+            usernameNormalized = normalizeUsername(authenticatedUser.usernameNormalized.ifBlank { authenticatedUser.username }),
             passwordHash = expectedHash,
             isOnline = true,
             lastSeenTimestamp = now
@@ -440,12 +473,36 @@ class UserRepository(
         startPresenceHeartbeat()
     }
 
+    fun selectAvatarImmediate(avatarSeed: String): UserEntity? {
+        val current = _currentUser.value ?: return null
+        val cleanSeed = avatarSeed.trim().ifBlank { current.avatarSeed }
+        val now = System.currentTimeMillis()
+        val updated = current.copy(
+            avatarSeed = cleanSeed,
+            isOnline = true,
+            lastSeenTimestamp = maxOf(current.lastSeenTimestamp + 1L, now)
+        )
+        val verifier = _localSessionVerifiers.value[current.id] ?: ""
+        _currentUser.value = updated
+        saveLocalAuthenticatedSession(updated, verifier)
+        scope.launch {
+            try {
+                userDao.updateUser(updated)
+            } catch (_: Exception) {
+            }
+        }
+        return updated
+    }
+
     suspend fun updateProfile(displayName: String, statusMessage: String, avatarSeed: String): Result<UserEntity> = withContext(Dispatchers.IO) {
         val current = _currentUser.value ?: return@withContext Result.failure(IllegalStateException("Not logged in"))
+        val now = System.currentTimeMillis()
         val updated = current.copy(
             displayName = displayName.trim().ifBlank { current.displayName },
             statusMessage = statusMessage.trim().ifBlank { current.statusMessage },
-            avatarSeed = avatarSeed
+            avatarSeed = avatarSeed.trim().ifBlank { current.avatarSeed },
+            isOnline = true,
+            lastSeenTimestamp = maxOf(current.lastSeenTimestamp + 1L, now)
         )
         val verifier = _localSessionVerifiers.value[current.id]
         userDao.updateUser(updated)
@@ -458,59 +515,78 @@ class UserRepository(
 
     /**
      * Queries the shared cloud backend (Firestore + GlobalRelayEngine) in real time using normalized username.
-     * Never uses local sessions as the source of truth.
+     * Never exposes the full user directory when query is blank and never uses local sessions as the source of truth.
      */
     suspend fun searchUsersInBackend(rawQuery: String, currentUserId: String): Result<List<UserEntity>> = withContext(Dispatchers.IO) {
+        val normQuery = normalizeUsername(rawQuery)
+        if (normQuery.isBlank()) {
+            return@withContext Result.success(emptyList())
+        }
+
         if (!RealtimeManager.isNetworkConnected.value) {
             return@withContext Result.failure(IOException("Unable to search because of a network/backend error."))
         }
 
-        val normQuery = normalizeUsername(rawQuery)
         val (firestoreResult, relayResult) = coroutineScope {
             val fsDeferred = async { firestoreSyncManager?.searchUsersInCloud(normQuery, currentUserId) }
             val relayDeferred = async { relayEngine?.searchUsersInCloud(normQuery, currentUserId) }
             fsDeferred.await() to relayDeferred.await()
         }
 
-        val fsSuccess = firestoreResult?.isSuccess == true
-        val relaySuccess = relayResult?.isSuccess == true
-
-        if (!fsSuccess && !relaySuccess) {
-            val err = relayResult?.exceptionOrNull()
-                ?: firestoreResult?.exceptionOrNull()
-                ?: IOException("Unable to search because of a network/backend error.")
-            return@withContext Result.failure(err)
-        }
-
         val mergedByNorm = linkedMapOf<String, UserEntity>()
+        if (firestoreSyncManager == null && relayEngine == null) {
+            val fallbackUsers = try {
+                userDao.searchUsersDirect(normQuery, currentUserId)
+            } catch (_: Exception) {
+                emptyList()
+            }
+            fallbackUsers.forEach { user ->
+                if (user.id != currentUserId) {
+                    val norm = normalizeUsername(user.usernameNormalized.ifBlank { user.username })
+                    if (norm.isNotBlank()) {
+                        mergedByNorm[norm] = user.copy(usernameNormalized = norm, passwordHash = "")
+                    }
+                }
+            }
+        }
         firestoreResult?.getOrNull()?.forEach { user ->
             if (user.id != currentUserId) {
-                mergedByNorm[user.usernameNormalized] = user.copy(passwordHash = "")
+                val norm = normalizeUsername(user.usernameNormalized.ifBlank { user.username })
+                if (norm.isNotBlank()) {
+                    mergedByNorm[norm] = user.copy(usernameNormalized = norm, passwordHash = "")
+                }
             }
         }
         relayResult?.getOrNull()?.forEach { user ->
             if (user.id != currentUserId) {
-                mergedByNorm[user.usernameNormalized] = user.copy(passwordHash = "")
+                val norm = normalizeUsername(user.usernameNormalized.ifBlank { user.username })
+                if (norm.isNotBlank()) {
+                    val existing = mergedByNorm[norm]
+                    if (existing == null || user.lastSeenTimestamp >= existing.lastSeenTimestamp) {
+                        mergedByNorm[norm] = user.copy(usernameNormalized = norm, passwordHash = "")
+                    }
+                }
             }
         }
 
-        val sorted = mergedByNorm.values.filter { user ->
-            if (normQuery.isBlank()) {
-                true
-            } else {
-                user.usernameNormalized.contains(normQuery) ||
-                    user.username.lowercase().contains(normQuery) ||
-                    user.displayName.lowercase().contains(normQuery)
-            }
-        }.sortedWith(
-            compareBy<UserEntity> {
-                when {
-                    it.usernameNormalized == normQuery -> 0
-                    it.usernameNormalized.startsWith(normQuery) -> 1
-                    else -> 2
-                }
-            }.thenByDescending { it.isOnline }.thenBy { it.displayName.lowercase() }
-        )
+        val exactMatch = mergedByNorm[normQuery]
+        val sorted = if (exactMatch != null) {
+            listOf(exactMatch)
+        } else {
+            mergedByNorm.values.filter { user ->
+                user.usernameNormalized == normQuery ||
+                    user.usernameNormalized.startsWith(normQuery) ||
+                    user.username.lowercase().startsWith(normQuery)
+            }.sortedWith(
+                compareBy<UserEntity> {
+                    when {
+                        it.usernameNormalized == normQuery -> 0
+                        it.usernameNormalized.startsWith(normQuery) -> 1
+                        else -> 2
+                    }
+                }.thenByDescending { it.isOnline }.thenBy { it.displayName.lowercase() }
+            )
+        }
 
         Result.success(sorted)
     }

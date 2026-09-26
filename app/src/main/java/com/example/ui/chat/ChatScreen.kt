@@ -57,8 +57,11 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -115,6 +118,7 @@ fun ChatScreen(
     val uiState by viewModel.uiState.collectAsState()
     val isOtherTyping by viewModel.isOtherUserTyping.collectAsState()
     val listState = rememberLazyListState()
+    var isPeerProfileModalOpen by remember { mutableStateOf(false) }
 
     val nowTick by produceState(initialValue = System.currentTimeMillis()) {
         while (true) {
@@ -207,19 +211,27 @@ fun ChatScreen(
                         now = nowTick
                     )
 
-                    // Recipient Avatar
-                    BrutalistAvatar(
-                        seedOrName = otherUser?.displayName ?: "USER",
-                        size = 38.dp,
-                        isOnline = peerEffectiveOnline
-                    )
-
-                    Spacer(modifier = Modifier.width(10.dp))
-
-                    // Name + Status with Real-time Firestore Typing Indicator & Last Seen Time
-                    Column(
-                        modifier = Modifier.weight(1f)
+                    // Recipient Avatar + Name (clickable to view peer profile)
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { isPeerProfileModalOpen = true }
+                            .testTag("chat_header_peer_profile_button"),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        BrutalistAvatar(
+                            seedOrName = otherUser?.displayName ?: "USER",
+                            avatarId = otherUser?.avatarSeed,
+                            size = 38.dp,
+                            isOnline = peerEffectiveOnline
+                        )
+
+                        Spacer(modifier = Modifier.width(10.dp))
+
+                        // Name + Status with Real-time Firestore Typing Indicator & Last Seen Time
+                        Column(
+                            modifier = Modifier.weight(1f)
+                        ) {
                         Text(
                             text = otherUser?.displayName ?: "Loading...",
                             fontWeight = FontWeight.Black,
@@ -283,6 +295,7 @@ fun ChatScreen(
                                     )
                                 }
                             }
+                        }
                         }
                     }
 
@@ -619,6 +632,133 @@ fun ChatScreen(
                             leadingIcon = Icons.Default.Share,
                             shadowOffset = 2.dp,
                             testTag = "button_share_full_image"
+                        )
+                    }
+                }
+            }
+        }
+
+        // Peer User Profile View Modal
+        if (isPeerProfileModalOpen && otherUser != null) {
+            val peer = otherUser!!
+            val peerOnline = DateTimeUtils.isEffectivelyOnline(
+                isOnline = peer.isOnline,
+                lastSeenTimestamp = peer.lastSeenTimestamp,
+                now = nowTick
+            )
+            Dialog(onDismissRequest = { isPeerProfileModalOpen = false }) {
+                BrutalistCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("chat_peer_profile_dialog"),
+                    backgroundColor = colors.cardBackground,
+                    borderColor = colors.border,
+                    borderWidth = 3.dp,
+                    shadowOffset = 4.dp
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "USER PROFILE // IDENTITY",
+                                fontWeight = FontWeight.Black,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.sp,
+                                color = colors.textPrimary
+                            )
+                            IconButton(onClick = { isPeerProfileModalOpen = false }) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Close profile",
+                                    tint = colors.textPrimary
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Box(
+                            modifier = Modifier
+                                .background(colors.accent, SharpCorner)
+                                .border(2.5.dp, BrutalistBlack, SharpCorner)
+                                .padding(4.dp)
+                        ) {
+                            BrutalistAvatar(
+                                seedOrName = peer.displayName,
+                                avatarId = peer.avatarSeed,
+                                size = 88.dp,
+                                isOnline = peerOnline,
+                                showOnlineBadge = true
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Text(
+                            text = peer.displayName,
+                            fontWeight = FontWeight.Black,
+                            fontSize = 18.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = colors.textPrimary
+                        )
+                        Text(
+                            text = "@${peer.username}",
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = colors.textSecondary
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        val statusText = DateTimeUtils.formatLastSeen(
+                            isOnline = peerOnline,
+                            lastSeenTimestamp = peer.lastSeenTimestamp,
+                            now = nowTick
+                        )
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    if (peerOnline) EasappOnlineGreen else colors.inputBackground,
+                                    SharpCorner
+                                )
+                                .border(1.5.dp, BrutalistBlack, SharpCorner)
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = statusText,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Black,
+                                fontFamily = FontFamily.Monospace,
+                                color = if (peerOnline) BrutalistBlack else colors.textPrimary
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Text(
+                            text = peer.statusMessage.ifBlank { "Available on Easapp" },
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = colors.textPrimary
+                        )
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        BrutalistButton(
+                            text = "CLOSE PROFILE",
+                            onClick = { isPeerProfileModalOpen = false },
+                            modifier = Modifier.fillMaxWidth(),
+                            backgroundColor = colors.accent,
+                            textColor = colors.accentOn,
+                            shadowOffset = 2.dp
                         )
                     }
                 }

@@ -7,6 +7,7 @@ import com.example.data.dao.UserDao
 import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
 import com.example.data.model.MessageStatus
+import com.example.data.model.UserConversationStateEntity
 import com.example.data.model.UserEntity
 import com.example.data.model.buildDeterministicConversationId
 import com.example.data.model.cleanDisplayUsername
@@ -54,8 +55,8 @@ class GlobalRelayEngine(
         .build()
 
     private val queryClient = OkHttpClient.Builder()
-        .readTimeout(12, TimeUnit.SECONDS)
-        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .connectTimeout(4, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
@@ -121,15 +122,14 @@ class GlobalRelayEngine(
         // Start background sync loop + immediate history pull for this authenticated backend UID
         periodicSyncJob?.cancel()
         periodicSyncJob = scope.launch {
-            // Immediate initial sync of cloud users and user's cloud message/conversation inbox
+            // Immediate initial sync of user's cloud message/conversation inbox
             try {
-                syncUsersFromCloud("")
                 syncUserInboxFromCloud(userId, forceFullHistory = true)
             } catch (_: Exception) {
             }
 
             while (isActive) {
-                delay(7500L)
+                delay(12_000L)
                 if (RealtimeManager.isNetworkConnected.value) {
                     try {
                         val activeUid = currentUserId ?: break
@@ -255,7 +255,7 @@ class GlobalRelayEngine(
                 "USER_REGISTERED", "USER_UPDATED", "PRESENCE_UPDATE" -> {
                     handleIncomingUserPayload(json)
                 }
-                "NEW_MESSAGE", "MESSAGE_STATUS", "READ_RECEIPT", "TYPING_INDICATOR", "CONVERSATION_SYNC" -> {
+                "NEW_MESSAGE", "MESSAGE_STATUS", "READ_RECEIPT", "TYPING_INDICATOR", "CONVERSATION_SYNC", "USER_CONVERSATION_STATE" -> {
                     handleIncomingMessagingPayload(json)
                 }
             }
@@ -307,6 +307,9 @@ class GlobalRelayEngine(
         return if (existing.lastSeenTimestamp > incoming.lastSeenTimestamp) {
             val freshOnline = existing.isOnline && (System.currentTimeMillis() - existing.lastSeenTimestamp) < 90_000L
             incoming.copy(
+                displayName = existing.displayName.ifBlank { incoming.displayName },
+                avatarSeed = existing.avatarSeed.ifBlank { incoming.avatarSeed },
+                statusMessage = existing.statusMessage.ifBlank { incoming.statusMessage },
                 isOnline = freshOnline,
                 lastSeenTimestamp = existing.lastSeenTimestamp
             )
@@ -324,7 +327,9 @@ class GlobalRelayEngine(
                     val parsed = parseUserFromJsonObject(userObj) ?: return null
                     val merged = mergeUserPreservingNewestPresence(cloudUsersCache[parsed.id], parsed)
                     cloudUsersCache[merged.id] = merged
-                    userDao.upsertRemoteUser(merged, allowPresenceUpdate = true)
+                    if (userDao.getUserByIdDirect(merged.id) != null) {
+                        userDao.upsertRemoteUser(merged, allowPresenceUpdate = true)
+                    }
                     merged
                 }
 
@@ -368,6 +373,37 @@ class GlobalRelayEngine(
         try {
             val myUid = currentUserId ?: return
             when (json.optString("action")) {
+                "USER_CONVERSATION_STATE" -> {
+                    val stateObj = json.optJSONObject("state") ?: json
+                    val stateUserId = stateObj.optString("userId", "").trim()
+                    val convId = stateObj.optString("conversationId", "").trim()
+                    // Security rule: a user can only modify/sync their own conversation state
+                    if (stateUserId.isBlank() || convId.isBlank() || stateUserId != myUid) return
+
+                    val otherUserId = stateObj.optString("otherUserId", "").trim()
+                    val hidden = stateObj.optBoolean("hidden", false)
+                    val deletedAt = stateObj.optLong("deletedAt", 0L)
+                    val lastMessage = stateObj.optString("lastMessage", "")
+                    val lastMessageAt = stateObj.optLong("lastMessageAt", 0L)
+                    val updatedAt = stateObj.optLong("updatedAt", deletedAt)
+
+                    val existingState = conversationDao.getUserConversationStateDirect(myUid, convId)
+                    if (existingState == null || updatedAt >= existingState.updatedAt || deletedAt >= existingState.deletedAt) {
+                        conversationDao.upsertUserConversationState(
+                            UserConversationStateEntity(
+                                userId = myUid,
+                                conversationId = convId,
+                                otherUserId = otherUserId.ifBlank { existingState?.otherUserId ?: "" },
+                                hidden = hidden,
+                                deletedAt = maxOf(deletedAt, existingState?.deletedAt ?: 0L),
+                                lastMessage = lastMessage,
+                                lastMessageAt = lastMessageAt,
+                                updatedAt = maxOf(updatedAt, existingState?.updatedAt ?: 0L)
+                            )
+                        )
+                    }
+                }
+
                 "CONVERSATION_SYNC" -> {
                     val convObj = json.optJSONObject("conversation") ?: return
                     val p1 = convObj.optString("participant1Id", "")
@@ -582,6 +618,19 @@ class GlobalRelayEngine(
                         conversationDao.insertConversation(newConv)
                     }
 
+                    // If this message is newer than the current user's deletedAt timestamp, unhide the conversation for currentUser
+                    val existingUserState = conversationDao.getUserConversationStateDirect(myUid, canonicalConvId)
+                    if (existingUserState != null && timestamp > existingUserState.deletedAt) {
+                        conversationDao.upsertUserConversationState(
+                            existingUserState.copy(
+                                hidden = false,
+                                lastMessage = previewText,
+                                lastMessageAt = timestamp,
+                                updatedAt = maxOf(timestamp, existingUserState.updatedAt)
+                            )
+                        )
+                    }
+
                     // Publish DELIVERED / READ status back to sender ONLY ONCE per upward status transition
                     if (isRecipientMe && statusRank(finalStatus) > statusRank(incomingStatus)) {
                         val alreadyBroadcasted = broadcastedRecipientStatuses[messageId]
@@ -747,7 +796,9 @@ class GlobalRelayEngine(
             }
             val finalUser = mergeUserPreservingNewestPresence(cloudUsersCache[uid], candidateUser)
             cloudUsersCache[uid] = finalUser
-            userDao.upsertRemoteUser(finalUser, allowPresenceUpdate = true)
+            if (userDao.getUserByIdDirect(finalUser.id) != null) {
+                userDao.upsertRemoteUser(finalUser, allowPresenceUpdate = true)
+            }
         }
 
         // Also apply standalone PRESENCE_UPDATE events for users already in cache/DB
@@ -791,12 +842,32 @@ class GlobalRelayEngine(
         }
     }
 
+    private suspend fun hydrateCacheFromLocalDao() {
+        try {
+            val localUsers = userDao.getAllUsersDirect()
+            for (local in localUsers) {
+                val norm = normalizeUsername(local.usernameNormalized.ifBlank { local.username })
+                if (local.id.isNotBlank() && norm.isNotBlank()) {
+                    val sanitized = local.copy(
+                        username = cleanDisplayUsername(local.username),
+                        usernameNormalized = norm,
+                        passwordHash = ""
+                    )
+                    cloudUsersCache[local.id] = mergeUserPreservingNewestPresence(cloudUsersCache[local.id], sanitized)
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     private suspend fun syncUsersFromCloud(targetNormUsername: String = ""): Result<Collection<UserEntity>> = withContext(Dispatchers.IO) {
         if (!RealtimeManager.isNetworkConnected.value) {
             return@withContext Result.failure(IOException("Unable to search because of a network/backend error."))
         }
 
         cloudSyncMutex.withLock {
+            hydrateCacheFromLocalDao()
+
             val now = System.currentTimeMillis()
             val hasTargetInCache = targetNormUsername.isNotBlank() &&
                 cloudUsersCache.values.any { it.usernameNormalized == targetNormUsername }
@@ -808,42 +879,48 @@ class GlobalRelayEngine(
             val canQuerySpecificUsername = targetNormUsername.isNotBlank() &&
                 targetNormUsername.matches(Regex("^[a-z0-9_.]+$"))
 
+            // Fast path for username lookup: query per-username topic with full history first
+            if (canQuerySpecificUsername) {
+                try {
+                    val specificPayloads = fetchTopicPayloadsFromCloud(
+                        "$baseTopic-uname-$targetNormUsername",
+                        forceFullHistory = true
+                    )
+                    applyUserPayloadsToCache(specificPayloads)
+                    val foundExact = cloudUsersCache.values.any {
+                        it.usernameNormalized == targetNormUsername
+                    }
+                    if (foundExact) {
+                        return@withLock Result.success(cloudUsersCache.values.toList())
+                    }
+                } catch (e: Exception) {
+                    Log.w(tag, "Specific username topic poll fallback for $targetNormUsername: ${e.message}")
+                }
+            }
+
             try {
-                val globalPayloads = fetchTopicPayloadsFromCloud("$baseTopic-users")
+                val globalPayloads = fetchTopicPayloadsFromCloud(
+                    "$baseTopic-users",
+                    forceFullHistory = targetNormUsername.isNotBlank()
+                )
                 applyUserPayloadsToCache(globalPayloads)
                 lastCloudSyncTimestamp = System.currentTimeMillis()
-
-                if (canQuerySpecificUsername &&
-                    cloudUsersCache.values.none { it.usernameNormalized == targetNormUsername }
-                ) {
-                    try {
-                        val specificPayloads = fetchTopicPayloadsFromCloud("$baseTopic-uname-$targetNormUsername")
-                        applyUserPayloadsToCache(specificPayloads)
-                    } catch (_: Exception) {
-                    }
-                }
-
                 Result.success(cloudUsersCache.values.toList())
             } catch (e: Exception) {
-                if (canQuerySpecificUsername) {
-                    try {
-                        val specificPayloads = fetchTopicPayloadsFromCloud("$baseTopic-uname-$targetNormUsername")
-                        applyUserPayloadsToCache(specificPayloads)
-                        if (cloudUsersCache.values.any { it.usernameNormalized == targetNormUsername }) {
-                            return@withLock Result.success(cloudUsersCache.values.toList())
-                        }
-                    } catch (_: Exception) {
-                    }
-                }
-                val msg = e.message ?: ""
-                if (msg.contains("HTTP_429") && RealtimeManager.isNetworkConnected.value && (_isConnected.value || cloudUsersCache.isNotEmpty())) {
-                    Log.w(tag, "Cloud poll rate-limited (429); serving live multiplexed stream cache")
+                Log.w(tag, "Cloud sync fallback to local/stream cache: ${e.message}")
+                if (RealtimeManager.isNetworkConnected.value) {
                     return@withLock Result.success(cloudUsersCache.values.toList())
                 }
-                Log.e(tag, "Cloud sync error: ${e.message}")
                 Result.failure(IOException("Unable to search because of a network/backend error.", e))
             }
         }
+    }
+
+    fun hasMatchingAuthVerifier(rawUsername: String, expectedAuthVerifier: String): Boolean {
+        val norm = normalizeUsername(rawUsername)
+        if (norm.isBlank() || expectedAuthVerifier.isBlank()) return false
+        val storedVerifier = cloudAuthVerifiers[norm]
+        return !storedVerifier.isNullOrBlank() && storedVerifier == expectedAuthVerifier
     }
 
     suspend fun checkUsernameExistsInCloud(rawUsername: String): Result<UserEntity?> = withContext(Dispatchers.IO) {
@@ -891,6 +968,10 @@ class GlobalRelayEngine(
      */
     suspend fun searchUsersInCloud(rawQuery: String, excludeUserId: String): Result<List<UserEntity>> = withContext(Dispatchers.IO) {
         val normQuery = normalizeUsername(rawQuery)
+        if (normQuery.isBlank()) {
+            return@withContext Result.success(emptyList())
+        }
+
         val syncResult = syncUsersFromCloud(targetNormUsername = normQuery)
         if (syncResult.isFailure) {
             return@withContext Result.failure(
@@ -908,23 +989,24 @@ class GlobalRelayEngine(
             }
         }
 
-        val matched = deduplicatedByNorm.values.filter { user ->
-            if (normQuery.isBlank()) {
-                true
-            } else {
-                user.usernameNormalized.contains(normQuery) ||
-                    user.username.lowercase().contains(normQuery) ||
-                    user.displayName.lowercase().contains(normQuery)
-            }
-        }.sortedWith(
-            compareBy<UserEntity> {
-                when {
-                    it.usernameNormalized == normQuery -> 0
-                    it.usernameNormalized.startsWith(normQuery) -> 1
-                    else -> 2
-                }
-            }.thenByDescending { it.isOnline }.thenBy { it.displayName.lowercase() }
-        )
+        val exactMatch = deduplicatedByNorm[normQuery]
+        val matched = if (exactMatch != null) {
+            listOf(exactMatch)
+        } else {
+            deduplicatedByNorm.values.filter { user ->
+                user.usernameNormalized == normQuery ||
+                    user.usernameNormalized.startsWith(normQuery) ||
+                    user.username.lowercase().startsWith(normQuery)
+            }.sortedWith(
+                compareBy<UserEntity> {
+                    when {
+                        it.usernameNormalized == normQuery -> 0
+                        it.usernameNormalized.startsWith(normQuery) -> 1
+                        else -> 2
+                    }
+                }.thenByDescending { it.isOnline }.thenBy { it.displayName.lowercase() }
+            )
+        }
 
         Result.success(matched)
     }
@@ -1066,16 +1148,27 @@ class GlobalRelayEngine(
 
         val payload = buildUserPayload(sanitized, isNew, verifierToStore)
         coroutineScope {
-            val globalDef = async { postPayloadDirect("$baseTopic-users", payload) }
+            val globalDef = async { postPayloadDirect("$baseTopic-users", payload, maxRetries = 1) }
             val unameDef = async {
                 if (normUser.isNotBlank()) {
-                    postPayloadDirect("$baseTopic-uname-$normUser", payload)
+                    postPayloadDirect("$baseTopic-uname-$normUser", payload, maxRetries = 1)
                 } else {
                     false
                 }
             }
             val globalOk = globalDef.await()
             val unameOk = unameDef.await()
+            if (!globalOk && !unameOk && RealtimeManager.isNetworkConnected.value) {
+                // Queue background retry if relay was temporarily rate-limited or unreachable
+                scope.launch {
+                    delay(1500L)
+                    postPayloadDirect("$baseTopic-users", payload, maxRetries = 2)
+                    if (normUser.isNotBlank()) {
+                        postPayloadDirect("$baseTopic-uname-$normUser", payload, maxRetries = 2)
+                    }
+                }
+                return@coroutineScope true
+            }
             globalOk || unameOk
         }
     }
@@ -1153,6 +1246,29 @@ class GlobalRelayEngine(
         postPayload("$baseTopic-conv-${conversation.id}", payload)
     }
 
+    suspend fun publishUserConversationState(state: UserConversationStateEntity): Boolean = withContext(Dispatchers.IO) {
+        val authenticatedUid = currentUserId
+        if (authenticatedUid == null || state.userId.isBlank() || state.userId != authenticatedUid) {
+            Log.e(tag, "Security violation: attempted to modify conversation state for unauthenticated userId=${state.userId}")
+            return@withContext false
+        }
+        val stateObj = JSONObject().apply {
+            put("conversationId", state.conversationId)
+            put("userId", state.userId)
+            put("otherUserId", state.otherUserId)
+            put("hidden", state.hidden)
+            put("deletedAt", state.deletedAt)
+            put("lastMessage", state.lastMessage)
+            put("lastMessageAt", state.lastMessageAt)
+            put("updatedAt", state.updatedAt)
+        }
+        val payload = JSONObject().apply {
+            put("action", "USER_CONVERSATION_STATE")
+            put("state", stateObj)
+        }
+        postPayloadDirect("$baseTopic-user-$authenticatedUid", payload, cacheHeader = true, maxRetries = 1)
+    }
+
     suspend fun publishMessageToCloud(
         message: MessageEntity,
         senderProfile: UserEntity?,
@@ -1216,10 +1332,18 @@ class GlobalRelayEngine(
         }
 
         coroutineScope {
-            val recipientDef = async { postPayloadDirect("$baseTopic-user-${message.recipientId}", payload, cacheHeader = true) }
-            val convDef = async { postPayloadDirect("$baseTopic-conv-${message.conversationId}", payload, cacheHeader = true) }
+            val recipientDef = async { postPayloadDirect("$baseTopic-user-${message.recipientId}", payload, cacheHeader = true, maxRetries = 1) }
+            val convDef = async { postPayloadDirect("$baseTopic-conv-${message.conversationId}", payload, cacheHeader = true, maxRetries = 1) }
             val deliveredToRecipient = recipientDef.await()
             val storedInConv = convDef.await()
+            if (!deliveredToRecipient && !storedInConv && RealtimeManager.isNetworkConnected.value) {
+                scope.launch {
+                    delay(1500L)
+                    postPayloadDirect("$baseTopic-user-${message.recipientId}", payload, cacheHeader = true, maxRetries = 2)
+                    postPayloadDirect("$baseTopic-conv-${message.conversationId}", payload, cacheHeader = true, maxRetries = 2)
+                }
+                return@coroutineScope true
+            }
             deliveredToRecipient || storedInConv
         }
     }

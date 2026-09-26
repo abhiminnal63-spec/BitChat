@@ -1,12 +1,19 @@
 package com.example.ui.profile
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,6 +26,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
@@ -36,9 +45,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -75,7 +86,7 @@ fun ProfileScreen(
     }
 
     val colors = BrutalistTheme.colors
-    val avatarPresets = listOf("ALICE", "BOB", "CYBER", "NEON", "MATRIX", "EASAPP")
+    val avatarOptions = listOf("ALICE", "BOB", "CYBER", "NEON", "MATRIX", "EASAPP")
     val deviceTimeStr = SimpleDateFormat("h:mm a (z)", Locale.getDefault()).format(Date())
 
     Box(
@@ -128,7 +139,7 @@ fun ProfileScreen(
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // Identity Card
+                // Identity & Avatar Selector Card
                 item {
                     BrutalistCard(
                         modifier = Modifier.fillMaxWidth(),
@@ -136,14 +147,15 @@ fun ProfileScreen(
                         shadowOffset = 3.dp
                     ) {
                         Column(
-                            modifier = Modifier.padding(16.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             BrutalistAvatar(
                                 seedOrName = uiState.selectedAvatar.ifBlank { currentUser?.displayName ?: "ME" },
                                 size = 72.dp,
-                                isOnline = true,
-                                showOnlineBadge = true
+                                isOnline = true
                             )
                             Spacer(modifier = Modifier.height(10.dp))
                             Text(
@@ -154,41 +166,42 @@ fun ProfileScreen(
                                 color = colors.textPrimary
                             )
                             Text(
-                                text = "@${currentUser?.username}",
+                                text = "@${currentUser?.username ?: ""}",
                                 fontSize = 12.sp,
                                 fontFamily = FontFamily.Monospace,
                                 color = colors.textSecondary
                             )
 
-                            Spacer(modifier = Modifier.height(14.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
 
                             Text(
                                 text = "SELECT AVATAR IDENTITY SEED:",
                                 fontSize = 10.sp,
-                                fontWeight = FontWeight.Black,
+                                fontWeight = FontWeight.Bold,
                                 fontFamily = FontFamily.Monospace,
                                 color = colors.textPrimary
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
+
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceEvenly
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                avatarPresets.forEach { preset ->
-                                    val isSelected = uiState.selectedAvatar == preset
+                                avatarOptions.forEach { seed ->
+                                    val isSelected = uiState.selectedAvatar == seed
                                     Box(
                                         modifier = Modifier
                                             .border(
-                                                if (isSelected) 3.dp else 1.5.dp,
-                                                if (isSelected) colors.accent else colors.border,
-                                                SharpCorner
+                                                width = if (isSelected) 3.dp else 0.dp,
+                                                color = if (isSelected) colors.accent else Color.Transparent,
+                                                shape = SharpCorner
                                             )
-                                            .clickable { viewModel.onAvatarSelect(preset) }
-                                            .padding(2.dp)
+                                            .padding(if (isSelected) 2.dp else 0.dp)
+                                            .clickable { viewModel.onAvatarSelect(seed) }
+                                            .testTag("avatar_option_${seed.lowercase()}")
                                     ) {
                                         BrutalistAvatar(
-                                            seedOrName = preset,
-                                            size = 36.dp,
+                                            seedOrName = seed,
+                                            size = 38.dp,
                                             showOnlineBadge = false
                                         )
                                     }
