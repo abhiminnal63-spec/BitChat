@@ -37,6 +37,7 @@ class FirestoreSyncManager(
 
     private val listeners = mutableListOf<ListenerRegistration>()
     private val messageListeners = mutableMapOf<String, ListenerRegistration>()
+    private val typingListeners = mutableMapOf<String, ListenerRegistration>()
 
     init {
         initializeFirestore()
@@ -139,8 +140,24 @@ class FirestoreSyncManager(
                                     )
                                     conversationDao.insertConversation(conv)
 
-                                    // Also listen to messages in this conversation
+                                    // Check inline typing fields on conversation document if present
+                                    val otherId = if (p1 == currentUserId) p2 else p1
+                                    if (otherId.isNotBlank()) {
+                                        val isOtherTypingField = doc.getBoolean("typing_$otherId")
+                                        val typingTimeField = doc.getLong("typingUpdatedAt_$otherId") ?: 0L
+                                        if (isOtherTypingField != null) {
+                                            val isFresh = (System.currentTimeMillis() - typingTimeField) < 10_000L
+                                            if (isOtherTypingField && isFresh) {
+                                                RealtimeManager.onUserTyping(id, otherId)
+                                            } else if (!isOtherTypingField) {
+                                                RealtimeManager.stopUserTyping(id, otherId)
+                                            }
+                                        }
+                                    }
+
+                                    // Also listen to messages and typing states in this conversation
                                     listenToConversationMessages(id, currentUserId)
+                                    listenToConversationTyping(id, currentUserId)
                                 } catch (e: Exception) {
                                     Log.e(tag, "Conversation parse error: ${e.message}")
                                 }
@@ -151,6 +168,51 @@ class FirestoreSyncManager(
             listeners.add(convReg)
         } catch (e: Exception) {
             Log.e(tag, "Error starting sync: ${e.message}")
+        }
+    }
+
+    fun subscribeToConversationTyping(conversationId: String, currentUserId: String) {
+        listenToConversationTyping(conversationId, currentUserId)
+    }
+
+    private fun listenToConversationTyping(conversationId: String, currentUserId: String) {
+        val db = firestore ?: return
+        if (typingListeners.containsKey(conversationId)) return
+
+        try {
+            val reg = db.collection("conversations")
+                .document(conversationId)
+                .collection("typing")
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null) {
+                        Log.e(tag, "Typing listener error: ${error.message}")
+                        return@addSnapshotListener
+                    }
+                    if (snapshot != null) {
+                        val now = System.currentTimeMillis()
+                        for (doc in snapshot.documents) {
+                            try {
+                                val typingUserId = doc.getString("userId") ?: doc.id
+                                if (typingUserId == currentUserId) continue
+
+                                val isTyping = doc.getBoolean("isTyping") ?: false
+                                val updatedAt = doc.getLong("updatedAt") ?: 0L
+                                val isRecent = (now - updatedAt) < 10_000L
+
+                                if (isTyping && isRecent) {
+                                    RealtimeManager.onUserTyping(conversationId, typingUserId)
+                                } else {
+                                    RealtimeManager.stopUserTyping(conversationId, typingUserId)
+                                }
+                            } catch (e: Exception) {
+                                Log.e(tag, "Typing document parse error: ${e.message}")
+                            }
+                        }
+                    }
+                }
+            typingListeners[conversationId] = reg
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to listen to typing in conversation $conversationId: ${e.message}")
         }
     }
 
@@ -328,6 +390,36 @@ class FirestoreSyncManager(
         }
     }
 
+    fun updateTypingStatusInCloud(conversationId: String, userId: String, isTyping: Boolean) {
+        val db = firestore ?: return
+        scope.launch {
+            try {
+                val now = System.currentTimeMillis()
+                val typingMap = hashMapOf<String, Any>(
+                    "userId" to userId,
+                    "conversationId" to conversationId,
+                    "isTyping" to isTyping,
+                    "updatedAt" to now
+                )
+                db.collection("conversations")
+                    .document(conversationId)
+                    .collection("typing")
+                    .document(userId)
+                    .set(typingMap, SetOptions.merge())
+
+                val inlineTypingMap = hashMapOf<String, Any>(
+                    "typing_$userId" to isTyping,
+                    "typingUpdatedAt_$userId" to now
+                )
+                db.collection("conversations")
+                    .document(conversationId)
+                    .set(inlineTypingMap, SetOptions.merge())
+            } catch (e: Exception) {
+                Log.e(tag, "Failed to update typing status in cloud: ${e.message}")
+            }
+        }
+    }
+
     fun stopSync() {
         for (listener in listeners) {
             listener.remove()
@@ -337,5 +429,9 @@ class FirestoreSyncManager(
             listener.remove()
         }
         messageListeners.clear()
+        for ((_, listener) in typingListeners) {
+            listener.remove()
+        }
+        typingListeners.clear()
     }
 }

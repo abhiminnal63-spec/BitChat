@@ -49,7 +49,7 @@ import com.example.ui.theme.BrutalistBlack
 import com.example.ui.theme.BrutalistButton
 import com.example.ui.theme.BrutalistCard
 import com.example.ui.theme.BrutalistTheme
-import com.example.ui.theme.EasappAccent
+import com.example.ui.theme.EasappColorTheme
 import com.example.ui.theme.EasappOnlineGreen
 import com.example.ui.theme.EasappSecondary
 import com.example.ui.theme.SharpCorner
@@ -66,6 +66,7 @@ fun ProfileScreen(
     val currentUser by viewModel.currentUser.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
     val isDarkMode by viewModel.isDarkMode.collectAsState()
+    val selectedTheme by viewModel.selectedTheme.collectAsState()
     val isCloudConnected by viewModel.isCloudConnected.collectAsState()
     val isRelayConnected by viewModel.isRelayConnected.collectAsState()
 
@@ -209,7 +210,7 @@ fun ProfileScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Text(
-                                text = "APPEARANCE // THEME",
+                                text = "APPEARANCE // CANVAS MODE",
                                 fontWeight = FontWeight.Black,
                                 fontSize = 12.sp,
                                 fontFamily = FontFamily.Monospace,
@@ -239,7 +240,7 @@ fun ProfileScreen(
 
                                 Box(
                                     modifier = Modifier
-                                        .background(if (isDarkMode) EasappAccent else colors.cardBackground, SharpCorner)
+                                        .background(if (isDarkMode) colors.accent else colors.cardBackground, SharpCorner)
                                         .border(2.dp, colors.border, SharpCorner)
                                         .clickable { viewModel.toggleDarkMode() }
                                         .padding(horizontal = 12.dp, vertical = 8.dp)
@@ -260,6 +261,132 @@ fun ProfileScreen(
                                             fontFamily = FontFamily.Monospace,
                                             color = if (isDarkMode) BrutalistBlack else colors.textPrimary
                                         )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // THEME Primary Accent Selector Card
+                item {
+                    BrutalistCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        backgroundColor = colors.cardBackground,
+                        shadowOffset = 3.dp
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "THEME",
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 14.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = colors.textPrimary
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .background(colors.accent, SharpCorner)
+                                        .border(1.5.dp, BrutalistBlack, SharpCorner)
+                                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                                ) {
+                                    Text(
+                                        text = "ACTIVE: ${selectedTheme.displayName}",
+                                        fontWeight = FontWeight.Black,
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = BrutalistBlack
+                                    )
+                                }
+                            }
+
+                            val themePairs = EasappColorTheme.entries.chunked(2)
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                themePairs.forEach { pair ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        pair.forEach { themeOption ->
+                                            val isSelected = selectedTheme == themeOption
+                                            BrutalistCard(
+                                                modifier = Modifier.weight(1f),
+                                                backgroundColor = themeOption.accentColor,
+                                                borderColor = BrutalistBlack,
+                                                borderWidth = if (isSelected) 4.dp else 2.dp,
+                                                shadowOffset = if (isSelected) 4.dp else 2.dp,
+                                                onClick = { viewModel.selectColorTheme(themeOption) },
+                                                testTag = "theme_option_${themeOption.id.lowercase()}"
+                                            ) {
+                                                Column(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(12.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        // Brutalist swatch block
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .size(18.dp)
+                                                                .background(
+                                                                    if (isSelected) BrutalistBlack else Color(0xFFF5F5F0),
+                                                                    SharpCorner
+                                                                )
+                                                                .border(2.dp, BrutalistBlack, SharpCorner),
+                                                            contentAlignment = Alignment.Center
+                                                        ) {
+                                                            if (isSelected) {
+                                                                Icon(
+                                                                    imageVector = Icons.Default.Check,
+                                                                    contentDescription = "Selected theme",
+                                                                    tint = themeOption.accentColor,
+                                                                    modifier = Modifier.size(12.dp)
+                                                                )
+                                                            }
+                                                        }
+
+                                                        if (isSelected) {
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .background(BrutalistBlack, SharpCorner)
+                                                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                            ) {
+                                                                Text(
+                                                                    text = "ACTIVE",
+                                                                    fontWeight = FontWeight.Black,
+                                                                    fontSize = 9.sp,
+                                                                    fontFamily = FontFamily.Monospace,
+                                                                    color = themeOption.accentColor
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+
+                                                    Text(
+                                                        text = themeOption.displayName,
+                                                        fontWeight = FontWeight.Black,
+                                                        fontSize = 12.sp,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        color = BrutalistBlack,
+                                                        lineHeight = 14.sp
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -304,7 +431,7 @@ fun ProfileScreen(
                                     singleLine = true,
                                     shape = SharpCorner,
                                     colors = OutlinedTextFieldDefaults.colors(
-                                        focusedBorderColor = colors.border,
+                                        focusedBorderColor = colors.accent,
                                         unfocusedBorderColor = colors.border.copy(alpha = 0.6f),
                                         focusedContainerColor = colors.inputBackground,
                                         unfocusedContainerColor = colors.inputBackground,
@@ -333,7 +460,7 @@ fun ProfileScreen(
                                     singleLine = true,
                                     shape = SharpCorner,
                                     colors = OutlinedTextFieldDefaults.colors(
-                                        focusedBorderColor = colors.border,
+                                        focusedBorderColor = colors.accent,
                                         unfocusedBorderColor = colors.border.copy(alpha = 0.6f),
                                         focusedContainerColor = colors.inputBackground,
                                         unfocusedContainerColor = colors.inputBackground,

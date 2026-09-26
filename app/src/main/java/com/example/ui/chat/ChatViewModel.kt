@@ -8,6 +8,8 @@ import com.example.data.model.UserEntity
 import com.example.data.realtime.RealtimeManager
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.UserRepository
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -52,6 +54,8 @@ class ChatViewModel(
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
+    private var typingDebounceJob: Job? = null
+
     init {
         onEnterScreen()
     }
@@ -59,13 +63,15 @@ class ChatViewModel(
     fun onEnterScreen() {
         val myId = currentUserId.value ?: return
         RealtimeManager.setUserActiveConversation(myId, conversationId)
-        chatRepository.enterConversationScreen(conversationId)
+        chatRepository.enterConversationScreen(conversationId, myId)
         viewModelScope.launch {
             chatRepository.markConversationAsRead(conversationId, myId)
         }
     }
 
     fun onExitScreen() {
+        typingDebounceJob?.cancel()
+        typingDebounceJob = null
         val myId = currentUserId.value ?: return
         RealtimeManager.setUserActiveConversation(myId, null)
         chatRepository.exitConversationScreen(conversationId)
@@ -75,8 +81,13 @@ class ChatViewModel(
     fun onTextInputChange(text: String) {
         _uiState.value = _uiState.value.copy(textInput = text)
         val myId = currentUserId.value ?: return
+        typingDebounceJob?.cancel()
         if (text.isNotBlank()) {
             chatRepository.notifyTyping(conversationId, myId)
+            typingDebounceJob = viewModelScope.launch {
+                delay(2200L)
+                chatRepository.stopTyping(conversationId, myId)
+            }
         } else {
             chatRepository.stopTyping(conversationId, myId)
         }
@@ -120,6 +131,9 @@ class ChatViewModel(
         val hasAttachment = state.selectedAttachmentUri != null
 
         if (text.isBlank() && !hasAttachment) return
+
+        typingDebounceJob?.cancel()
+        typingDebounceJob = null
 
         viewModelScope.launch {
             chatRepository.sendMessage(

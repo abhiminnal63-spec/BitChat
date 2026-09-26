@@ -250,8 +250,8 @@ fun BrutalistAvatar(
 fun BrutalistBadge(
     count: Int,
     modifier: Modifier = Modifier,
-    backgroundColor: Color = EasappAccent,
-    textColor: Color = BrutalistBlack
+    backgroundColor: Color = BrutalistTheme.colors.accent,
+    textColor: Color = BrutalistTheme.colors.accentOn
 ) {
     if (count <= 0) return
 
@@ -414,7 +414,7 @@ fun BrutalistTypingIndicator(
             Box(
                 modifier = Modifier
                     .size(6.dp)
-                    .background(EasappAccent.copy(alpha = dotAlpha1), CircleShape)
+                    .background(BrutalistTheme.colors.accent.copy(alpha = dotAlpha1), CircleShape)
             )
             Spacer(modifier = Modifier.width(6.dp))
             Text(

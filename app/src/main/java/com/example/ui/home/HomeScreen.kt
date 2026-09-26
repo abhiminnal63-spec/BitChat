@@ -245,7 +245,7 @@ fun HomeScreen(
                         },
                         shape = SharpCorner,
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = colors.border,
+                            focusedBorderColor = colors.accent,
                             unfocusedBorderColor = colors.border.copy(alpha = 0.5f),
                             focusedContainerColor = colors.inputBackground,
                             unfocusedContainerColor = colors.inputBackground,
@@ -373,8 +373,8 @@ fun HomeScreen(
                     BrutalistButton(
                         text = "+ NEW CHAT",
                         onClick = onNavigateToNewChat,
-                        backgroundColor = EasappAccent,
-                        textColor = BrutalistBlack,
+                        backgroundColor = colors.accent,
+                        textColor = colors.accentOn,
                         leadingIcon = Icons.Default.Add,
                         shadowOffset = 4.dp,
                         testTag = "button_new_chat"

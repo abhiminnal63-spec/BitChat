@@ -74,8 +74,12 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val isDarkMode by themeManager.isDarkMode.collectAsState()
+            val selectedTheme by themeManager.selectedTheme.collectAsState()
 
-            EasappTheme(darkTheme = isDarkMode) {
+            EasappTheme(
+                darkTheme = isDarkMode,
+                colorTheme = selectedTheme
+            ) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = if (isDarkMode) BrutalistBlack else BrutalistBackground

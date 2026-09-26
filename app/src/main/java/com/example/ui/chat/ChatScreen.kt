@@ -4,11 +4,19 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -184,7 +192,7 @@ fun ChatScreen(
 
                     Spacer(modifier = Modifier.width(10.dp))
 
-                    // Name + Status with Device-Accurate Last Seen Time
+                    // Name + Status with Real-time Firestore Typing Indicator & Last Seen Time
                     Column(
                         modifier = Modifier.weight(1f)
                     ) {
@@ -197,19 +205,60 @@ fun ChatScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            val isOnline = otherUser?.isOnline == true
-                            val lastSeenText = DateTimeUtils.formatLastSeen(
-                                isOnline = isOnline,
-                                lastSeenTimestamp = otherUser?.lastSeenTimestamp ?: 0L
-                            )
-                            Text(
-                                text = "• $lastSeenText",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace,
-                                color = if (isOnline) EasappOnlineGreen else colors.textSecondary
-                            )
+                        AnimatedContent(
+                            targetState = isOtherTyping,
+                            transitionSpec = {
+                                fadeIn(animationSpec = tween(180)) togetherWith fadeOut(animationSpec = tween(140))
+                            },
+                            label = "header_typing_status"
+                        ) { typingActive ->
+                            if (typingActive) {
+                                val infiniteTransition = rememberInfiniteTransition(label = "header_typing_pulse")
+                                val dotAlpha by infiniteTransition.animateFloat(
+                                    initialValue = 0.35f,
+                                    targetValue = 1f,
+                                    animationSpec = infiniteRepeatable(
+                                        animation = tween(450),
+                                        repeatMode = RepeatMode.Reverse
+                                    ),
+                                    label = "typing_dot_alpha"
+                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.testTag("chat_header_typing_indicator")
+                                ) {
+                                    Text(
+                                        text = "●",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Black,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = EasappOnlineGreen.copy(alpha = dotAlpha)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "typing...",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Black,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = EasappOnlineGreen
+                                    )
+                                }
+                            } else {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    val isOnline = otherUser?.isOnline == true
+                                    val lastSeenText = DateTimeUtils.formatLastSeen(
+                                        isOnline = isOnline,
+                                        lastSeenTimestamp = otherUser?.lastSeenTimestamp ?: 0L
+                                    )
+                                    Text(
+                                        text = "• $lastSeenText",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = if (isOnline) EasappOnlineGreen else colors.textSecondary
+                                    )
+                                }
+                            }
                         }
                     }
 
@@ -406,7 +455,7 @@ fun ChatScreen(
                         Icon(
                             imageVector = Icons.Default.EmojiEmotions,
                             contentDescription = "Emojis",
-                            tint = if (uiState.isEmojiPickerOpen) EasappSecondary else colors.textPrimary
+                            tint = if (uiState.isEmojiPickerOpen) colors.accent else colors.textPrimary
                         )
                     }
 
@@ -431,7 +480,7 @@ fun ChatScreen(
                         maxLines = 4,
                         shape = SharpCorner,
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = colors.border,
+                            focusedBorderColor = colors.accent,
                             unfocusedBorderColor = colors.border.copy(alpha = 0.5f),
                             focusedContainerColor = colors.inputBackground,
                             unfocusedContainerColor = colors.inputBackground,

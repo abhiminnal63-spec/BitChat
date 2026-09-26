@@ -34,6 +34,7 @@ class ChatRepository(
     val relayEngine: GlobalRelayEngine? = null
 ) {
     private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val lastCloudTypingSync = mutableMapOf<String, Long>()
 
     fun getConversationsForUser(userId: String): Flow<List<ConversationEntity>> {
         return conversationDao.getConversationsForUser(userId)
@@ -47,8 +48,11 @@ class ChatRepository(
         return conversationDao.getConversationById(conversationId)
     }
 
-    fun enterConversationScreen(conversationId: String) {
+    fun enterConversationScreen(conversationId: String, currentUserId: String? = null) {
         relayEngine?.subscribeToConversation(conversationId)
+        if (currentUserId != null) {
+            firestoreSyncManager?.subscribeToConversationTyping(conversationId, currentUserId)
+        }
     }
 
     fun exitConversationScreen(conversationId: String) {
@@ -124,8 +128,7 @@ class ChatRepository(
         relayEngine?.broadcastMessage(message)
 
         // Stop typing immediately once message is sent
-        RealtimeManager.stopUserTyping(conversationId, senderId)
-        relayEngine?.broadcastTyping(conversationId, senderId, false)
+        stopTyping(conversationId, senderId)
 
         // Update conversation summary
         val conv = conversationDao.getConversationByIdDirect(conversationId)
@@ -182,11 +185,21 @@ class ChatRepository(
 
     fun notifyTyping(conversationId: String, userId: String) {
         RealtimeManager.onUserTyping(conversationId, userId)
-        relayEngine?.broadcastTyping(conversationId, userId, true)
+        val key = "${conversationId}_$userId"
+        val now = System.currentTimeMillis()
+        val lastSync = lastCloudTypingSync[key] ?: 0L
+        if (now - lastSync >= 900L) {
+            lastCloudTypingSync[key] = now
+            firestoreSyncManager?.updateTypingStatusInCloud(conversationId, userId, true)
+            relayEngine?.broadcastTyping(conversationId, userId, true)
+        }
     }
 
     fun stopTyping(conversationId: String, userId: String) {
+        val key = "${conversationId}_$userId"
+        lastCloudTypingSync.remove(key)
         RealtimeManager.stopUserTyping(conversationId, userId)
+        firestoreSyncManager?.updateTypingStatusInCloud(conversationId, userId, false)
         relayEngine?.broadcastTyping(conversationId, userId, false)
     }
 }

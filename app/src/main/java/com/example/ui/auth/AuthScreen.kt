@@ -213,7 +213,7 @@ fun AuthScreen(
                                 },
                                 shape = SharpCorner,
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = colors.border,
+                                    focusedBorderColor = colors.accent,
                                     unfocusedBorderColor = colors.border.copy(alpha = 0.5f),
                                     focusedContainerColor = colors.inputBackground,
                                     unfocusedContainerColor = colors.inputBackground,
@@ -254,7 +254,7 @@ fun AuthScreen(
                                     },
                                     shape = SharpCorner,
                                     colors = OutlinedTextFieldDefaults.colors(
-                                        focusedBorderColor = colors.border,
+                                        focusedBorderColor = colors.accent,
                                         unfocusedBorderColor = colors.border.copy(alpha = 0.5f),
                                         focusedContainerColor = colors.inputBackground,
                                         unfocusedContainerColor = colors.inputBackground,
@@ -304,7 +304,7 @@ fun AuthScreen(
                                 },
                                 shape = SharpCorner,
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = colors.border,
+                                    focusedBorderColor = colors.accent,
                                     unfocusedBorderColor = colors.border.copy(alpha = 0.5f),
                                     focusedContainerColor = colors.inputBackground,
                                     unfocusedContainerColor = colors.inputBackground,
@@ -350,7 +350,7 @@ fun AuthScreen(
                                     visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                                     shape = SharpCorner,
                                     colors = OutlinedTextFieldDefaults.colors(
-                                        focusedBorderColor = colors.border,
+                                        focusedBorderColor = colors.accent,
                                         unfocusedBorderColor = colors.border.copy(alpha = 0.5f),
                                         focusedContainerColor = colors.inputBackground,
                                         unfocusedContainerColor = colors.inputBackground,

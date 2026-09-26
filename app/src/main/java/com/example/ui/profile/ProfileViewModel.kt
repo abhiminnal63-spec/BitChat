@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.model.UserEntity
 import com.example.data.repository.UserRepository
+import com.example.ui.theme.EasappColorTheme
 import com.example.util.ThemeManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -28,6 +29,7 @@ class ProfileViewModel(
 
     val currentUser: StateFlow<UserEntity?> = userRepository.currentUser
     val isDarkMode: StateFlow<Boolean> = themeManager.isDarkMode
+    val selectedTheme: StateFlow<EasappColorTheme> = themeManager.selectedTheme
     val isCloudConnected: StateFlow<Boolean> = userRepository.firestoreSyncManager?.isCloudConnected
         ?: MutableStateFlow(false)
     val isRelayConnected: StateFlow<Boolean> = userRepository.relayEngine?.isConnected
@@ -52,6 +54,10 @@ class ProfileViewModel(
 
     fun toggleDarkMode() {
         themeManager.toggleDarkMode()
+    }
+
+    fun selectColorTheme(theme: EasappColorTheme) {
+        themeManager.setColorTheme(theme)
     }
 
     fun onDisplayNameChange(value: String) {
