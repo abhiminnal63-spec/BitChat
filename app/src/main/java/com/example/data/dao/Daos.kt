@@ -342,4 +342,7 @@ interface MessageDao {
 
     @Query("SELECT * FROM messages WHERE senderId = :senderId AND (status = 'SENDING' OR status = 'FAILED') ORDER BY timestamp ASC, id ASC")
     suspend fun getPendingOutgoingMessages(senderId: String): List<MessageEntity>
+
+    @Query("SELECT * FROM messages WHERE status = 'SENDING' OR status = 'FAILED' ORDER BY timestamp ASC, id ASC")
+    suspend fun getAllPendingOutgoingMessages(): List<MessageEntity>
 }

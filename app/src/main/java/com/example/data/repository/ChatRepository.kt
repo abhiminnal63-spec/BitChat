@@ -49,6 +49,16 @@ class ChatRepository(
     private val timestampLock = Any()
     private var lastIssuedTimestamp = 0L
 
+    init {
+        repoScope.launch {
+            RealtimeManager.isNetworkConnected.collect { connected ->
+                if (connected) {
+                    retryAllPendingMessages()
+                }
+            }
+        }
+    }
+
     private fun nextMonotonicTimestamp(minFloor: Long = 0L): Long = synchronized(timestampLock) {
         val now = System.currentTimeMillis()
         val floor = maxOf(lastIssuedTimestamp, minFloor)
@@ -166,6 +176,7 @@ class ChatRepository(
         if (currentUserId != null) {
             firestoreSyncManager?.subscribeToConversation(conversationId, currentUserId)
             repoScope.launch {
+                retryAllPendingMessages(currentUserId)
                 firestoreSyncManager?.synchronizeOfflineMessagesForUser(currentUserId)
                 relayEngine?.synchronizeOfflineMessagesForUser(currentUserId)
             }
@@ -174,6 +185,7 @@ class ChatRepository(
 
     suspend fun synchronizeOfflineMessages(userId: String): Int = withContext(Dispatchers.IO) {
         if (userId.isBlank()) return@withContext 0
+        retryAllPendingMessages(userId)
         val fsSynced = firestoreSyncManager?.synchronizeOfflineMessagesForUser(userId) ?: 0
         val relaySynced = relayEngine?.synchronizeOfflineMessagesForUser(userId) ?: 0
         fsSynced + relaySynced
@@ -407,26 +419,28 @@ class ChatRepository(
                 conversationDao.updateLastMessageStatus(message.conversationId, finalStatus)
 
                 // Store message permanently FIRST, then dispatch FCM push notification to recipient's registered devices
-                try {
-                    val senderDisplayName = senderProfile?.displayName?.ifBlank { senderProfile.username } ?: "Contact"
-                    val recipientDevices = DeviceTokenManager.getRegisteredDevicesForUser(
-                        userId = message.recipientId,
-                        userDao = userDao,
-                        firestoreSyncManager = firestoreSyncManager,
-                        relayEngine = relayEngine
-                    )
-                    val storedMessage = messageToPublish.copy(status = finalStatus)
-                    firestoreSyncManager?.enqueuePushNotificationInCloud(
-                        message = storedMessage,
-                        senderDisplayName = senderDisplayName,
-                        devices = recipientDevices
-                    )
-                    relayEngine?.publishFcmPushNotification(
-                        message = storedMessage,
-                        senderDisplayName = senderDisplayName,
-                        devices = recipientDevices
-                    )
-                } catch (_: Exception) {
+                repoScope.launch {
+                    try {
+                        val senderDisplayName = senderProfile?.displayName?.ifBlank { senderProfile.username } ?: "Contact"
+                        val recipientDevices = DeviceTokenManager.getRegisteredDevicesForUser(
+                            userId = message.recipientId,
+                            userDao = userDao,
+                            firestoreSyncManager = firestoreSyncManager,
+                            relayEngine = relayEngine
+                        )
+                        val storedMessage = messageToPublish.copy(status = finalStatus)
+                        firestoreSyncManager?.enqueuePushNotificationInCloud(
+                            message = storedMessage,
+                            senderDisplayName = senderDisplayName,
+                            devices = recipientDevices
+                        )
+                        relayEngine?.publishFcmPushNotification(
+                            message = storedMessage,
+                            senderDisplayName = senderDisplayName,
+                            devices = recipientDevices
+                        )
+                    } catch (_: Exception) {
+                    }
                 }
             } else {
                 messageDao.advanceMessageStatus(message.id, MessageStatus.FAILED.name)
@@ -453,6 +467,22 @@ class ChatRepository(
             updatedAt = System.currentTimeMillis()
         )
         dispatchMessageToBackend(existing.copy(status = MessageStatus.SENDING.name), conv)
+    }
+
+    suspend fun retryAllPendingMessages(userId: String? = null): Int = withContext(Dispatchers.IO) {
+        if (!RealtimeManager.isNetworkConnected.value) return@withContext 0
+        val pendingList = if (!userId.isNullOrBlank()) {
+            messageDao.getPendingOutgoingMessages(userId.trim())
+        } else {
+            messageDao.getAllPendingOutgoingMessages()
+        }
+        var sentCount = 0
+        for (pending in pendingList) {
+            if (retryMessage(pending.id)) {
+                sentCount++
+            }
+        }
+        sentCount
     }
 
     suspend fun markConversationAsRead(conversationId: String, readerId: String) = withContext(Dispatchers.IO) {

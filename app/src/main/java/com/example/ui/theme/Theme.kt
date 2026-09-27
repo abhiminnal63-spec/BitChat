@@ -2,7 +2,9 @@ package com.example.ui.theme
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -10,6 +12,15 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+
+val BrutalistShapes = Shapes(
+    extraSmall = RoundedCornerShape(0.dp),
+    small = RoundedCornerShape(0.dp),
+    medium = RoundedCornerShape(0.dp),
+    large = RoundedCornerShape(0.dp),
+    extraLarge = RoundedCornerShape(0.dp)
+)
 
 data class BrutalistColors(
     val background: Color,
@@ -28,33 +39,33 @@ data class BrutalistColors(
 )
 
 val LightBrutalistColors = BrutalistColors(
-    background = Color(0xFFF5F5F0),
-    surface = Color(0xFFFFFFFF),
-    cardBackground = Color(0xFFFFFFFF),
-    textPrimary = Color(0xFF121212),
-    textSecondary = Color(0xFF555555),
-    border = Color(0xFF121212),
-    shadow = Color(0xFF121212),
-    accent = Color(0xFFD2FF00),
-    accentOn = Color(0xFF121212),
-    secondary = Color(0xFFFF5722),
-    inputBackground = Color(0xFFECECE6),
+    background = BrutalistBackground,
+    surface = BrutalistPureWhite,
+    cardBackground = BrutalistPureWhite,
+    textPrimary = BrutalistPureBlack,
+    textSecondary = BrutalistContrastInk,
+    border = BrutalistPureBlack,
+    shadow = BrutalistPureBlack,
+    accent = EasappAccent,
+    accentOn = BrutalistPureBlack,
+    secondary = EasappSecondary,
+    inputBackground = BrutalistStarkGrayLight,
     isDark = false,
     colorTheme = EasappColorTheme.FLUORESCENT_GREEN
 )
 
 val DarkBrutalistColors = BrutalistColors(
-    background = Color(0xFF101010),
-    surface = Color(0xFF181818),
-    cardBackground = Color(0xFF1E1E1E),
-    textPrimary = Color(0xFFF0F0F0),
-    textSecondary = Color(0xFFA8A8A8),
-    border = Color(0xFFECECEC),
-    shadow = Color(0xFF000000),
-    accent = Color(0xFFD2FF00),
-    accentOn = Color(0xFF121212),
-    secondary = Color(0xFFFF5722),
-    inputBackground = Color(0xFF262626),
+    background = BrutalistDarkBackground,
+    surface = BrutalistDarkCard,
+    cardBackground = BrutalistDarkCard,
+    textPrimary = BrutalistPureWhite,
+    textSecondary = BrutalistContrastSilver,
+    border = BrutalistPureWhite,
+    shadow = BrutalistPureWhite,
+    accent = EasappAccent,
+    accentOn = BrutalistPureBlack,
+    secondary = EasappSecondary,
+    inputBackground = BrutalistStarkGrayDark,
     isDark = true,
     colorTheme = EasappColorTheme.FLUORESCENT_GREEN
 )
@@ -74,12 +85,28 @@ fun EasappTheme(
     content: @Composable () -> Unit
 ) {
     val baseColors = if (darkTheme) DarkBrutalistColors else LightBrutalistColors
-    val animSpec = tween<Color>(durationMillis = 260)
+    val animSpec = tween<Color>(durationMillis = 220)
+
+    val targetAccent = if (!darkTheme && colorTheme == EasappColorTheme.MONOCHROME_BW) {
+        BrutalistPureBlack
+    } else {
+        colorTheme.accentColor
+    }
+    val targetAccentOn = if (!darkTheme && colorTheme == EasappColorTheme.MONOCHROME_BW) {
+        BrutalistPureWhite
+    } else {
+        BrutalistPureBlack
+    }
 
     val animatedAccent by animateColorAsState(
-        targetValue = colorTheme.accentColor,
+        targetValue = targetAccent,
         animationSpec = animSpec,
         label = "theme_accent"
+    )
+    val animatedAccentOn by animateColorAsState(
+        targetValue = targetAccentOn,
+        animationSpec = animSpec,
+        label = "theme_accent_on"
     )
     val animatedBackground by animateColorAsState(
         targetValue = baseColors.background,
@@ -125,7 +152,7 @@ fun EasappTheme(
         textSecondary = animatedTextSecondary,
         border = animatedBorder,
         accent = animatedAccent,
-        accentOn = BrutalistBlack,
+        accentOn = animatedAccentOn,
         inputBackground = animatedInputBg,
         colorTheme = colorTheme
     )
@@ -133,44 +160,62 @@ fun EasappTheme(
     val colorScheme = if (darkTheme) {
         darkColorScheme(
             primary = animatedAccent,
-            onPrimary = BrutalistBlack,
-            secondary = EasappSecondary,
-            onSecondary = BrutalistWhite,
+            onPrimary = animatedAccentOn,
+            primaryContainer = BrutalistPureWhite,
+            onPrimaryContainer = BrutalistPureBlack,
+            secondary = BrutalistPureWhite,
+            onSecondary = BrutalistPureBlack,
+            secondaryContainer = BrutalistStarkGrayDark,
+            onSecondaryContainer = BrutalistPureWhite,
             tertiary = EasappCobalt,
-            onTertiary = BrutalistWhite,
+            onTertiary = BrutalistPureWhite,
             background = animatedBackground,
-            onBackground = animatedTextPrimary,
+            onBackground = BrutalistPureWhite,
             surface = animatedCardBg,
-            onSurface = animatedTextPrimary,
+            onSurface = BrutalistPureWhite,
             surfaceVariant = animatedInputBg,
-            onSurfaceVariant = animatedTextPrimary,
-            outline = animatedBorder,
-            outlineVariant = EasappMuted
+            onSurfaceVariant = BrutalistContrastSilver,
+            inverseSurface = BrutalistPureWhite,
+            inverseOnSurface = BrutalistPureBlack,
+            error = EasappSecondary,
+            onError = BrutalistPureWhite,
+            outline = BrutalistPureWhite,
+            outlineVariant = BrutalistContrastSilver
         )
     } else {
         lightColorScheme(
             primary = animatedAccent,
-            onPrimary = BrutalistBlack,
-            secondary = EasappSecondary,
-            onSecondary = BrutalistWhite,
+            onPrimary = animatedAccentOn,
+            primaryContainer = BrutalistPureBlack,
+            onPrimaryContainer = BrutalistPureWhite,
+            secondary = BrutalistPureBlack,
+            onSecondary = BrutalistPureWhite,
+            secondaryContainer = BrutalistStarkGrayLight,
+            onSecondaryContainer = BrutalistPureBlack,
             tertiary = EasappCobalt,
-            onTertiary = BrutalistWhite,
+            onTertiary = BrutalistPureWhite,
             background = animatedBackground,
-            onBackground = BrutalistBlack,
+            onBackground = BrutalistPureBlack,
             surface = animatedSurface,
-            onSurface = BrutalistBlack,
+            onSurface = BrutalistPureBlack,
             surfaceVariant = animatedInputBg,
-            onSurfaceVariant = BrutalistBlack,
-            outline = BrutalistBlack,
-            outlineVariant = EasappMuted
+            onSurfaceVariant = BrutalistContrastInk,
+            inverseSurface = BrutalistPureBlack,
+            inverseOnSurface = BrutalistPureWhite,
+            error = EasappSecondary,
+            onError = BrutalistPureWhite,
+            outline = BrutalistPureBlack,
+            outlineVariant = BrutalistContrastInk
         )
     }
 
     CompositionLocalProvider(LocalBrutalistColors provides brutalistColors) {
         MaterialTheme(
             colorScheme = colorScheme,
-            typography = Typography,
+            typography = BrutalistTypography,
+            shapes = BrutalistShapes,
             content = content
         )
     }
 }
+

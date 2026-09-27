@@ -77,11 +77,12 @@ class BitchatPushService : Service() {
                     try {
                         val relay = GlobalRelayEngine.getInstance(applicationContext)
                         relay.ensurePushStreamConnected(uid)
+                        relay.retryAllPendingOutgoingMessages(uid)
                     } catch (e: Exception) {
                         Log.w(TAG, "Background push stream check warning: ${e.message}")
                     }
                 }
-                delay(15_000L)
+                delay(12_000L)
             }
         }
     }

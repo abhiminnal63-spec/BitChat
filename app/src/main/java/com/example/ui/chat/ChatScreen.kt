@@ -83,6 +83,8 @@ import com.example.ui.theme.BrutalistAvatar
 import com.example.ui.theme.BrutalistBlack
 import com.example.ui.theme.BrutalistButton
 import com.example.ui.theme.BrutalistCard
+import com.example.ui.theme.BrutalistMonoFontFamily
+import com.example.ui.theme.BrutalistSansFontFamily
 import com.example.ui.theme.BrutalistTheme
 import com.example.ui.theme.BrutalistTypingIndicator
 import com.example.ui.theme.BrutalistWhite
@@ -268,7 +270,7 @@ fun ChatScreen(
                                 text = headerDisplayName,
                                 fontWeight = FontWeight.Black,
                                 fontSize = 14.sp,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = BrutalistSansFontFamily,
                                 color = colors.textPrimary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -300,7 +302,7 @@ fun ChatScreen(
                                                 text = "●",
                                                 fontSize = 9.sp,
                                                 fontWeight = FontWeight.Black,
-                                                fontFamily = FontFamily.Monospace,
+                                                fontFamily = BrutalistMonoFontFamily,
                                                 color = EasappOnlineGreen.copy(alpha = dotAlpha)
                                             )
                                             Spacer(modifier = Modifier.width(4.dp))
@@ -308,7 +310,7 @@ fun ChatScreen(
                                                 text = "typing...",
                                                 fontSize = 10.sp,
                                                 fontWeight = FontWeight.Black,
-                                                fontFamily = FontFamily.Monospace,
+                                                fontFamily = BrutalistMonoFontFamily,
                                                 color = EasappOnlineGreen
                                             )
                                         }
@@ -323,7 +325,7 @@ fun ChatScreen(
                                                 text = "• $lastSeenText",
                                                 fontSize = 10.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                fontFamily = FontFamily.Monospace,
+                                                fontFamily = BrutalistMonoFontFamily,
                                                 color = if (peerEffectiveOnline) EasappOnlineGreen else colors.textSecondary
                                             )
                                         }
@@ -335,7 +337,7 @@ fun ChatScreen(
                                         text = "• Reconnecting...",
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace,
+                                        fontFamily = BrutalistMonoFontFamily,
                                         color = colors.textSecondary
                                     )
                                 }
@@ -370,7 +372,7 @@ fun ChatScreen(
                                     text = "REPLY AS",
                                     fontSize = 9.sp,
                                     fontWeight = FontWeight.Black,
-                                    fontFamily = FontFamily.Monospace,
+                                    fontFamily = BrutalistMonoFontFamily,
                                     color = colors.accentOn
                                 )
                             }
@@ -417,14 +419,14 @@ fun ChatScreen(
                                     text = "[ CONVERSATION INITIALIZED ]",
                                     fontWeight = FontWeight.Black,
                                     fontSize = 12.sp,
-                                    fontFamily = FontFamily.Monospace,
+                                    fontFamily = BrutalistMonoFontFamily,
                                     color = colors.textPrimary
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(
                                     text = "Send the first message to @${otherUser?.username ?: "recipient"}. Real-time protocol is active.",
                                     fontSize = 11.sp,
-                                    fontFamily = FontFamily.Monospace,
+                                    fontFamily = BrutalistMonoFontFamily,
                                     color = colors.textSecondary,
                                     lineHeight = 15.sp
                                 )
@@ -571,7 +573,7 @@ fun ChatScreen(
                                 text = "MESSAGE...",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = BrutalistMonoFontFamily,
                                 color = colors.textSecondary
                             )
                         },

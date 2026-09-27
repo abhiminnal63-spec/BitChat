@@ -46,6 +46,8 @@ import com.example.data.model.MessageEntity
 import com.example.data.model.MessageStatus
 import com.example.ui.theme.BrutalistBlack
 import com.example.ui.theme.BrutalistCard
+import com.example.ui.theme.BrutalistMonoFontFamily
+import com.example.ui.theme.BrutalistSansFontFamily
 import com.example.ui.theme.BrutalistTheme
 import com.example.ui.theme.BrutalistWhite
 import com.example.ui.theme.EasappAccent
@@ -176,7 +178,7 @@ fun MessageBubbleItem(
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = BrutalistWhite,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = BrutalistMonoFontFamily
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Icon(
@@ -199,10 +201,10 @@ fun MessageBubbleItem(
                     Text(
                         text = message.content,
                         fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
+                        fontWeight = FontWeight.Bold,
                         color = textColor,
                         lineHeight = 19.sp,
-                        fontFamily = FontFamily.Default
+                        fontFamily = BrutalistSansFontFamily
                     )
                 }
 
@@ -223,7 +225,7 @@ fun MessageBubbleItem(
                         text = timeStr,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = BrutalistMonoFontFamily,
                         color = timeColor
                     )
                     if (isOutgoing) {
@@ -258,7 +260,7 @@ fun DateSeparatorItem(dateText: String) {
                 text = dateText.uppercase(),
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Black,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = BrutalistMonoFontFamily,
                 color = if (colors.isDark) BrutalistBlack else colors.accent,
                 letterSpacing = 1.sp
             )
@@ -303,13 +305,13 @@ fun AttachmentDraftPreview(
                     text = "ATTACHED PHOTO",
                     fontWeight = FontWeight.Black,
                     fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = BrutalistMonoFontFamily,
                     color = colors.textPrimary
                 )
                 Text(
                     text = name ?: "image_attachment.jpg",
                     fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = BrutalistMonoFontFamily,
                     color = colors.textSecondary
                 )
             }

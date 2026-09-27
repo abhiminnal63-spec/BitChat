@@ -193,12 +193,14 @@ object BitchatNotificationManager {
         return RealtimeManager.isUserViewingConversation(recipientId, conversationId)
     }
 
-    private fun hasAlreadyNotified(context: Context, messageId: String): Boolean {
-        if (notifiedMessageIds.contains(messageId)) return true
+    fun hasAlreadyNotified(context: Context, messageId: String): Boolean {
+        val cleanId = messageId.trim()
+        if (cleanId.isBlank()) return false
+        if (notifiedMessageIds.contains(cleanId)) return true
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val stored = prefs.getStringSet(KEY_NOTIFIED_IDS, emptySet()) ?: emptySet()
-        if (stored.contains(messageId)) {
-            notifiedMessageIds.add(messageId)
+        if (stored.contains(cleanId)) {
+            notifiedMessageIds.add(cleanId)
             return true
         }
         return false

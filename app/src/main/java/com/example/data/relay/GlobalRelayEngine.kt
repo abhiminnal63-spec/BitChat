@@ -76,10 +76,20 @@ class GlobalRelayEngine(
     private val processedMessageStatuses = ConcurrentHashMap<String, String>()
     // Tracks highest status already broadcasted back to sender for each incoming messageId (prevents amplification loops)
     private val broadcastedRecipientStatuses = ConcurrentHashMap<String, String>()
-    // Tracks last event unix timestamp (seconds) per polled topic for incremental polling
+    // Tracks last event unix timestamp (seconds) and ntfy event ID per polled topic for zero-duplicate incremental polling
     private val topicLastPollTimestamp = ConcurrentHashMap<String, Long>()
+    private val topicLastEventId = ConcurrentHashMap<String, String>()
+    private val topicInitialFullSyncCompleted = ConcurrentHashMap<String, Long>()
+    private val processedNtfyEventIds = ConcurrentHashMap.newKeySet<String>()
+    private val conversationLastReadAt = ConcurrentHashMap<String, Long>()
     @Volatile
     private var streamLastEventTime: Long = 0L
+    @Volatile
+    private var streamLastEventId: String? = null
+    @Volatile
+    private var isStreamConnecting: Boolean = false
+    @Volatile
+    private var lastStreamStartAttemptMs: Long = 0L
 
     private val cloudSyncMutex = Mutex()
     @Volatile
@@ -93,8 +103,36 @@ class GlobalRelayEngine(
     @Volatile
     private var currentUserId: String? = null
 
+    init {
+        if (appContext != null) {
+            val savedUid = appContext.getSharedPreferences("easapp_session_prefs", Context.MODE_PRIVATE)
+                .getString("logged_in_user_id", null)?.trim()
+            if (!savedUid.isNullOrBlank()) {
+                currentUserId = savedUid
+            }
+        }
+        // Automatically reconnect stream, flush queued outgoing messages, and pull missed offline messages when internet returns
+        scope.launch {
+            var wasConnected = RealtimeManager.isNetworkConnected.value
+            RealtimeManager.isNetworkConnected.collect { connected ->
+                if (connected && !wasConnected) {
+                    val uid = currentUserId ?: appContext
+                        ?.getSharedPreferences("easapp_session_prefs", Context.MODE_PRIVATE)
+                        ?.getString("logged_in_user_id", null)
+                        ?.trim()
+                    if (!uid.isNullOrBlank()) {
+                        ensurePushStreamConnected(uid)
+                        flushPendingOutgoingMessagesForUser(uid)
+                        syncUserInboxFromCloud(uid, forceFullHistory = false)
+                    }
+                }
+                wasConnected = connected
+            }
+        }
+    }
+
     /**
-     * Uses a SINGLE dedicated SSE push stream per authenticated user (`$baseTopic-user-$uid`)
+     * Uses a SINGLE dedicated SSE push stream per authenticated user (`$baseTopic-user-$uid,$baseTopic-users`)
      * and cancels any previous OkHttp call immediately so two physical devices on the same Wi-Fi
      * router never leak zombie sockets or hit per-IP connection limits.
      */
@@ -108,9 +146,12 @@ class GlobalRelayEngine(
         val uid = currentUserId
         if (uid.isNullOrBlank()) {
             _isConnected.value = false
+            isStreamConnecting = false
             return
         }
-        val topics = "$baseTopic-user-$uid"
+        val topics = "$baseTopic-user-$uid,$baseTopic-users"
+        lastStreamStartAttemptMs = System.currentTimeMillis()
+        isStreamConnecting = true
 
         multiplexedStreamJob = scope.launch {
             listenToMultiplexedStream(topics)
@@ -120,12 +161,15 @@ class GlobalRelayEngine(
     fun ensurePushStreamConnected(userId: String) {
         val cleanUid = userId.trim()
         if (cleanUid.isBlank()) return
-        if (currentUserId != cleanUid || multiplexedStreamJob?.isActive != true || !_isConnected.value) {
+        val now = System.currentTimeMillis()
+        val isConnectingRecently = isStreamConnecting && (now - lastStreamStartAttemptMs) < 8_000L
+        if (currentUserId != cleanUid || multiplexedStreamJob?.isActive != true || (!_isConnected.value && !isConnectingRecently)) {
             start(cleanUid)
         } else {
             scope.launch {
                 if (RealtimeManager.isNetworkConnected.value) {
                     try {
+                        flushPendingOutgoingMessagesForUser(cleanUid)
                         syncUserInboxFromCloud(cleanUid, forceFullHistory = false)
                     } catch (_: Exception) {
                     }
@@ -141,25 +185,34 @@ class GlobalRelayEngine(
         currentUserId = cleanUid
         if (changed) {
             streamLastEventTime = 0L
+            streamLastEventId = null
         }
-        if (changed || multiplexedStreamJob?.isActive != true || !_isConnected.value) {
+        val now = System.currentTimeMillis()
+        val isConnectingRecently = isStreamConnecting && (now - lastStreamStartAttemptMs) < 8_000L
+        if (changed || multiplexedStreamJob?.isActive != true || (!_isConnected.value && !isConnectingRecently)) {
             restartMultiplexedStream()
+        }
+
+        if (!changed && periodicSyncJob?.isActive == true) {
+            return
         }
 
         // Start background sync loop + immediate history pull for this authenticated backend UID
         periodicSyncJob?.cancel()
         periodicSyncJob = scope.launch {
-            // Immediate initial sync of user's cloud message/conversation inbox
+            // Immediate initial sync of user's cloud message/conversation inbox + flush any offline outgoing messages
             try {
+                flushPendingOutgoingMessagesForUser(cleanUid)
                 syncUserInboxFromCloud(cleanUid, forceFullHistory = true)
             } catch (_: Exception) {
             }
 
             while (isActive) {
-                delay(5_000L)
+                delay(4_500L)
                 if (RealtimeManager.isNetworkConnected.value) {
                     try {
                         val activeUid = currentUserId ?: break
+                        flushPendingOutgoingMessagesForUser(activeUid)
                         syncUserInboxFromCloud(activeUid, forceFullHistory = false)
                         activeConversationId?.let { convId ->
                             syncConversationHistoryFromCloud(convId, forceFullHistory = false)
@@ -189,17 +242,20 @@ class GlobalRelayEngine(
 
     private suspend fun listenToMultiplexedStream(topicsCsv: String) {
         while (scope.isActive) {
-            var retryDelayMs = 3000L
+            var retryDelayMs = 2500L
             if (!RealtimeManager.isNetworkConnected.value) {
                 _isConnected.value = false
+                isStreamConnecting = false
                 delay(2000L)
                 continue
             }
             try {
-                val sinceParam = if (streamLastEventTime > 0L) {
-                    "${maxOf(0L, streamLastEventTime - 3L)}"
-                } else {
-                    "all"
+                isStreamConnecting = true
+                lastStreamStartAttemptMs = System.currentTimeMillis()
+                val sinceParam = when {
+                    !streamLastEventId.isNullOrBlank() -> streamLastEventId!!
+                    streamLastEventTime > 0L -> "${maxOf(0L, streamLastEventTime - 2L)}"
+                    else -> "${maxOf(0L, (System.currentTimeMillis() / 1000L) - 15L)}"
                 }
                 val url = "https://ntfy.sh/$topicsCsv/json?since=$sinceParam"
                 val request = Request.Builder()
@@ -209,6 +265,7 @@ class GlobalRelayEngine(
                 val call = streamClient.newCall(request)
                 activeStreamCall = call
                 call.execute().use { response ->
+                    isStreamConnecting = false
                     if (response.isSuccessful) {
                         _isConnected.value = true
                         val inputStream = response.body?.byteStream() ?: return@use
@@ -228,6 +285,20 @@ class GlobalRelayEngine(
                                 }
                                 val event = wrapper.optString("event", "")
                                 if (event == "message") {
+                                    val evId = wrapper.optString("id", "").trim()
+                                    if (evId.isNotBlank()) {
+                                        streamLastEventId = evId
+                                        val topicName = wrapper.optString("topic", "").trim()
+                                        if (topicName.isNotBlank()) {
+                                            topicLastEventId[topicName] = evId
+                                            if (evTime > 0L) {
+                                                topicLastPollTimestamp[topicName] = evTime
+                                            }
+                                        }
+                                        if (!processedNtfyEventIds.add(evId)) {
+                                            continue
+                                        }
+                                    }
                                     val messageContent = extractPayloadFromWrapper(wrapper)
                                     if (messageContent.isNotBlank()) {
                                         dispatchIncomingPayload(messageContent)
@@ -245,6 +316,7 @@ class GlobalRelayEngine(
                     }
                 }
             } catch (e: Exception) {
+                isStreamConnecting = false
                 Log.w(tag, "Multiplexed stream disconnected: ${e.message}")
                 _isConnected.value = false
             }
@@ -634,13 +706,18 @@ class GlobalRelayEngine(
                     val resolvedAttachmentUri = attachmentUri ?: mediaUrl
 
                     val existingLocalMsg = messageDao.getMessageByIdDirect(messageId)
+                    val existingUserState = conversationDao.getUserConversationStateDirect(myUid, canonicalConvId)
                     val isRecipientMe = recipientId == myUid
                     val isViewing = isRecipientMe &&
                         RealtimeManager.isAppInForeground.value &&
                         RealtimeManager.isUserViewingConversation(myUid, canonicalConvId)
 
+                    val lastReadAtForConv = conversationLastReadAt[canonicalConvId] ?: 0L
+                    val alreadyReadInBatchOrHistory = (timestamp > 0L && timestamp <= lastReadAtForConv) ||
+                        (existingUserState != null && existingUserState.deletedAt > 0L && timestamp <= existingUserState.deletedAt)
+
                     val effectiveStatus = when {
-                        isRecipientMe && isViewing -> MessageStatus.READ.name
+                        isRecipientMe && (isViewing || alreadyReadInBatchOrHistory) -> MessageStatus.READ.name
                         isRecipientMe && statusRank(incomingStatus) < statusRank(MessageStatus.DELIVERED.name) -> MessageStatus.DELIVERED.name
                         else -> incomingStatus
                     }
@@ -680,18 +757,18 @@ class GlobalRelayEngine(
                     val existingConv = conversationDao.getConversationByIdDirect(canonicalConvId)
                         ?: conversationDao.findConversationBetween(senderId, recipientId)
 
-                    val isBrandNewMessage = existingLocalMsg == null
+                    val isBrandNewUnreadMessage = existingLocalMsg == null && finalStatus != MessageStatus.READ.name
                     if (existingConv != null) {
                         if (timestamp >= existingConv.lastMessageTimestamp) {
                             val isMeP1 = existingConv.participant1Id == myUid
-                            val newUnread1 = if (isRecipientMe && isMeP1 && !isViewing && isBrandNewMessage) {
+                            val newUnread1 = if (isRecipientMe && isMeP1 && !isViewing && isBrandNewUnreadMessage) {
                                 existingConv.unreadCountForUser1 + 1
                             } else if (isMeP1 && isViewing) {
                                 0
                             } else {
                                 existingConv.unreadCountForUser1
                             }
-                            val newUnread2 = if (isRecipientMe && !isMeP1 && !isViewing && isBrandNewMessage) {
+                            val newUnread2 = if (isRecipientMe && !isMeP1 && !isViewing && isBrandNewUnreadMessage) {
                                 existingConv.unreadCountForUser2 + 1
                             } else if (!isMeP1 && isViewing) {
                                 0
@@ -715,8 +792,8 @@ class GlobalRelayEngine(
                         }
                     } else {
                         val isMeP1 = sortedParticipants[0] == myUid
-                        val unread1 = if (isRecipientMe && isMeP1 && !isViewing) 1 else 0
-                        val unread2 = if (isRecipientMe && !isMeP1 && !isViewing) 1 else 0
+                        val unread1 = if (isRecipientMe && isMeP1 && !isViewing && finalStatus != MessageStatus.READ.name) 1 else 0
+                        val unread2 = if (isRecipientMe && !isMeP1 && !isViewing && finalStatus != MessageStatus.READ.name) 1 else 0
                         val newConv = ConversationEntity(
                             id = canonicalConvId,
                             participant1Id = sortedParticipants[0],
@@ -733,7 +810,6 @@ class GlobalRelayEngine(
                     }
 
                     // If this message is newer than the current user's deletedAt timestamp, unhide the conversation for currentUser
-                    val existingUserState = conversationDao.getUserConversationStateDirect(myUid, canonicalConvId)
                     if (existingUserState != null && timestamp > existingUserState.deletedAt) {
                         conversationDao.upsertUserConversationState(
                             existingUserState.copy(
@@ -767,7 +843,9 @@ class GlobalRelayEngine(
                     // Show Android push notification when recipient is NOT actively viewing the conversation in foreground (CASE 2 / 3 / 4)
                     if (isRecipientMe && !isViewing && appContext != null && finalStatus != MessageStatus.READ.name) {
                         val senderUser = userDao.getUserByIdDirect(senderId) ?: cloudUsersCache[senderId]
-                        val senderName = senderUser?.displayName?.takeIf { it.isNotBlank() }
+                        val embeddedPushName = json.optJSONObject("push")?.optString("senderName", "")?.trim()
+                        val senderName = embeddedPushName?.takeIf { it.isNotBlank() }
+                            ?: senderUser?.displayName?.takeIf { it.isNotBlank() }
                             ?: senderUser?.username?.takeIf { it.isNotBlank() }
                             ?: "Contact"
                         BitchatNotificationManager.showIncomingMessageNotification(
@@ -788,9 +866,15 @@ class GlobalRelayEngine(
                     )
                     val actorId = json.optString("receiverId", json.optString("readerId", ""))
                     val updatedAt = json.optLong("updatedAt", 0L)
-                    if (actorId.isNotBlank() && actorId != myUid) {
-                        if (updatedAt > 0L) {
+                    if (actorId.isNotBlank()) {
+                        if (actorId != myUid && updatedAt > 0L) {
                             userDao.recordPeerActivity(actorId, updatedAt)
+                        }
+                        if (actorId == myUid && status == MessageStatus.READ.name && convId.isNotBlank() && updatedAt > 0L) {
+                            val prevReadAt = conversationLastReadAt[convId] ?: 0L
+                            if (updatedAt > prevReadAt) {
+                                conversationLastReadAt[convId] = updatedAt
+                            }
                         }
                         if (messageId.isNotBlank()) {
                             val prev = processedMessageStatuses[messageId]
@@ -800,6 +884,16 @@ class GlobalRelayEngine(
                             }
                         } else if (convId.isNotBlank() && status == MessageStatus.READ.name) {
                             messageDao.markAllInConversationAsRead(convId, MessageStatus.READ.name)
+                            if (actorId == myUid) {
+                                val conv = conversationDao.getConversationByIdDirect(convId)
+                                if (conv != null) {
+                                    if (conv.participant1Id == myUid) {
+                                        conversationDao.clearUnreadForUser1(convId)
+                                    } else if (conv.participant2Id == myUid) {
+                                        conversationDao.clearUnreadForUser2(convId)
+                                    }
+                                }
+                            }
                         }
                         if (convId.isNotBlank()) {
                             conversationDao.updateLastMessageStatus(convId, status)
@@ -838,11 +932,19 @@ class GlobalRelayEngine(
         if (!RealtimeManager.isNetworkConnected.value) {
             throw IOException("Unable to search because of a network/backend error.")
         }
+        val nowMs = System.currentTimeMillis()
+        val lastFullSyncMs = topicInitialFullSyncCompleted[topic] ?: 0L
+        val lastEventId = topicLastEventId[topic]
         val lastPollSec = topicLastPollTimestamp[topic]
-        val sinceParam = if (forceFullHistory || lastPollSec == null || lastPollSec <= 0L) {
-            "all"
-        } else {
-            "${maxOf(0L, lastPollSec - 2L)}"
+
+        val shouldUseAll = (forceFullHistory && (nowMs - lastFullSyncMs) > 12_000L) ||
+            (lastEventId.isNullOrBlank() && (lastPollSec == null || lastPollSec <= 0L))
+
+        val sinceParam = when {
+            shouldUseAll -> "all"
+            !lastEventId.isNullOrBlank() -> lastEventId
+            lastPollSec != null && lastPollSec > 0L -> "$lastPollSec"
+            else -> "all"
         }
         val request = Request.Builder()
             .url("https://ntfy.sh/$topic/json?poll=1&since=$sinceParam")
@@ -853,9 +955,13 @@ class GlobalRelayEngine(
                 throw IOException("HTTP_${response.code}: Backend returned HTTP ${response.code}")
             }
             _isConnected.value = true
+            if (shouldUseAll) {
+                topicInitialFullSyncCompleted[topic] = nowMs
+            }
             val bodyStr = response.body?.string() ?: return@use emptyList()
             val payloads = mutableListOf<String>()
             var maxEventTime = lastPollSec ?: 0L
+            var newestEventId = lastEventId
             bodyStr.lineSequence().forEach { rawLine ->
                 val lineStr = rawLine.trim()
                 if (lineStr.isNotBlank()) {
@@ -866,6 +972,14 @@ class GlobalRelayEngine(
                             maxEventTime = evTime
                         }
                         if (wrapper.optString("event") == "message") {
+                            val evId = wrapper.optString("id", "").trim()
+                            if (evId.isNotBlank()) {
+                                newestEventId = evId
+                                if (!shouldUseAll && !processedNtfyEventIds.add(evId)) {
+                                    return@forEach
+                                }
+                                processedNtfyEventIds.add(evId)
+                            }
                             val msg = extractPayloadFromWrapper(wrapper)
                             if (msg.isNotBlank()) {
                                 payloads.add(msg)
@@ -877,6 +991,9 @@ class GlobalRelayEngine(
             }
             if (maxEventTime > 0L) {
                 topicLastPollTimestamp[topic] = maxEventTime
+            }
+            if (!newestEventId.isNullOrBlank()) {
+                topicLastEventId[topic] = newestEventId!!
             }
             payloads
         }
@@ -966,13 +1083,34 @@ class GlobalRelayEngine(
         }
     }
 
+    private suspend fun dispatchPayloadBatch(payloads: List<String>) {
+        if (payloads.isEmpty()) return
+        // Pass 1: Apply all status transitions, read receipts, and conversation deletions first
+        // so historical messages that were already READ or deleted never trigger stale notifications
+        val remainingPayloads = mutableListOf<String>()
+        for (payload in payloads) {
+            try {
+                val json = JSONObject(payload)
+                val action = json.optString("action")
+                if (action == "MESSAGE_STATUS" || action == "READ_RECEIPT" || action == "USER_CONVERSATION_STATE") {
+                    handleIncomingMessagingPayload(json)
+                } else {
+                    remainingPayloads.add(payload)
+                }
+            } catch (_: Exception) {
+            }
+        }
+        // Pass 2: Process user registrations, device syncs, conversations, and messages in chronological order
+        for (payload in remainingPayloads) {
+            dispatchIncomingPayload(payload)
+        }
+    }
+
     suspend fun syncUserInboxFromCloud(userId: String, forceFullHistory: Boolean = false) = withContext(Dispatchers.IO) {
         if (!RealtimeManager.isNetworkConnected.value || userId.isBlank()) return@withContext
         try {
             val payloads = fetchTopicPayloadsFromCloud("$baseTopic-user-$userId", forceFullHistory = forceFullHistory)
-            for (payload in payloads) {
-                dispatchIncomingPayload(payload)
-            }
+            dispatchPayloadBatch(payloads)
         } catch (e: Exception) {
             Log.w(tag, "Inbox sync warning for $userId: ${e.message}")
         }
@@ -982,11 +1120,35 @@ class GlobalRelayEngine(
         if (!RealtimeManager.isNetworkConnected.value || conversationId.isBlank()) return@withContext
         try {
             val payloads = fetchTopicPayloadsFromCloud("$baseTopic-conv-$conversationId", forceFullHistory = forceFullHistory)
-            for (payload in payloads) {
-                dispatchIncomingPayload(payload)
-            }
+            dispatchPayloadBatch(payloads)
         } catch (e: Exception) {
             Log.w(tag, "Conversation history sync warning for $conversationId: ${e.message}")
+        }
+    }
+
+    suspend fun flushPendingOutgoingMessagesForUser(senderId: String) = withContext(Dispatchers.IO) {
+        val cleanUid = senderId.trim()
+        if (cleanUid.isBlank() || !RealtimeManager.isNetworkConnected.value) return@withContext
+        try {
+            val pending = messageDao.getPendingOutgoingMessages(cleanUid)
+            if (pending.isEmpty()) return@withContext
+            val senderProfile = userDao.getUserByIdDirect(cleanUid)
+            for (msg in pending) {
+                if (!RealtimeManager.isNetworkConnected.value) break
+                val receiverProfile = userDao.getUserByIdDirect(msg.recipientId)
+                val ok = publishMessageToCloud(
+                    message = msg,
+                    senderProfile = senderProfile,
+                    receiverProfile = receiverProfile
+                )
+                if (ok) {
+                    messageDao.advanceMessageStatus(msg.id, MessageStatus.SENT.name)
+                    val latest = messageDao.getMessageByIdDirect(msg.id)?.status ?: MessageStatus.SENT.name
+                    conversationDao.updateLastMessageStatus(msg.conversationId, latest)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(tag, "Pending outgoing message flush warning: ${e.message}")
         }
     }
 
@@ -1020,11 +1182,11 @@ class GlobalRelayEngine(
             val hasTargetInCache = targetNormUsername.isNotBlank() &&
                 cloudUsersCache.values.any { it.usernameNormalized == targetNormUsername }
 
-            if ((now - lastCloudSyncTimestamp) < 1200L && (targetNormUsername.isBlank() || hasTargetInCache) && cloudUsersCache.isNotEmpty()) {
+            if ((now - lastCloudSyncTimestamp) < 3500L && (targetNormUsername.isBlank() || hasTargetInCache) && cloudUsersCache.isNotEmpty()) {
                 return@withLock Result.success(cloudUsersCache.values.toList())
             }
 
-            val canQuerySpecificUsername = targetNormUsername.isNotBlank() &&
+            val canQuerySpecificUsername = targetNormUsername.length >= 3 &&
                 targetNormUsername.matches(Regex("^[a-z0-9_.]+$"))
 
             // Fast path for username lookup: query per-username topic with full history first
@@ -1047,9 +1209,10 @@ class GlobalRelayEngine(
             }
 
             try {
+                val needFullUsersHistory = lastCloudSyncTimestamp == 0L || (now - lastCloudSyncTimestamp) > 30_000L
                 val globalPayloads = fetchTopicPayloadsFromCloud(
                     "$baseTopic-users",
-                    forceFullHistory = targetNormUsername.isNotBlank()
+                    forceFullHistory = needFullUsersHistory
                 )
                 applyUserPayloadsToCache(globalPayloads)
                 lastCloudSyncTimestamp = System.currentTimeMillis()
@@ -1438,6 +1601,9 @@ class GlobalRelayEngine(
     }
 
     suspend fun publishUserConversationState(state: UserConversationStateEntity): Boolean = withContext(Dispatchers.IO) {
+        if (currentUserId == null && state.userId.isNotBlank()) {
+            currentUserId = state.userId
+        }
         val authenticatedUid = currentUserId
         if (authenticatedUid == null || state.userId.isBlank() || state.userId != authenticatedUid) {
             Log.e(tag, "Security violation: attempted to modify conversation state for unauthenticated userId=${state.userId}")
@@ -1466,6 +1632,9 @@ class GlobalRelayEngine(
         receiverProfile: UserEntity?,
         compactInlineImageUri: String? = null
     ): Boolean = withContext(Dispatchers.IO) {
+        if (currentUserId == null && message.senderId.isNotBlank()) {
+            currentUserId = message.senderId
+        }
         // Security: enforce that senderId matches the authenticated backend session UID
         val authenticatedUid = currentUserId
         if (authenticatedUid == null || message.senderId != authenticatedUid) {
@@ -1492,6 +1661,15 @@ class GlobalRelayEngine(
             ?: httpMediaUrl
         val resolvedMediaUrl = httpMediaUrl ?: safeInlineAttachment
 
+        val senderDisplayName = senderProfile?.displayName?.takeIf { it.isNotBlank() }
+            ?: senderProfile?.username?.takeIf { it.isNotBlank() }
+            ?: "Contact"
+        val notificationBody = BitchatNotificationManager.formatNotificationBody(
+            type = messageType,
+            content = message.content,
+            hasMedia = isImage
+        )
+
         val msgObj = JSONObject().apply {
             put("messageId", message.id)
             put("id", message.id)
@@ -1511,9 +1689,25 @@ class GlobalRelayEngine(
             put("attachmentName", message.attachmentName ?: JSONObject.NULL)
             put("attachmentSize", message.attachmentSize ?: JSONObject.NULL)
         }
+        val pushObj = JSONObject().apply {
+            put("messageId", message.id)
+            put("conversationId", message.conversationId)
+            put("senderId", message.senderId)
+            put("receiverId", message.recipientId)
+            put("senderName", senderDisplayName)
+            put("appTitle", "BITCHAT")
+            put("type", messageType)
+            put("text", message.content)
+            put("notificationBody", notificationBody)
+            put("collapseKey", "bitchat_conv_${message.conversationId}")
+            put("groupKey", BitchatNotificationManager.GROUP_KEY_MESSAGES)
+            put("channelId", BitchatNotificationManager.CHANNEL_ID)
+            put("createdAt", message.timestamp)
+        }
         val payload = JSONObject().apply {
             put("action", "NEW_MESSAGE")
             put("message", msgObj)
+            put("push", pushObj)
             if (senderProfile != null) {
                 put("senderProfile", buildUserJsonObject(senderProfile))
             }
@@ -1527,13 +1721,11 @@ class GlobalRelayEngine(
             val convDef = async { postPayloadDirect("$baseTopic-conv-${message.conversationId}", payload, cacheHeader = true, maxRetries = 1) }
             val deliveredToRecipient = recipientDef.await()
             val storedInConv = convDef.await()
-            if (!deliveredToRecipient && !storedInConv && RealtimeManager.isNetworkConnected.value) {
-                scope.launch {
-                    delay(1500L)
-                    postPayloadDirect("$baseTopic-user-${message.recipientId}", payload, cacheHeader = true, maxRetries = 2)
-                    postPayloadDirect("$baseTopic-conv-${message.conversationId}", payload, cacheHeader = true, maxRetries = 2)
+            if (deliveredToRecipient || storedInConv) {
+                // Mirror asynchronously to sender's own inbox topic for multi-device history continuity
+                if (message.senderId != message.recipientId) {
+                    postPayload("$baseTopic-user-${message.senderId}", payload, cacheHeader = true)
                 }
-                return@coroutineScope true
             }
             deliveredToRecipient || storedInConv
         }
@@ -1561,8 +1753,12 @@ class GlobalRelayEngine(
     }
 
     fun broadcastReadReceipt(conversationId: String, messageId: String?, readerId: String, senderId: String) {
+        val now = System.currentTimeMillis()
         if (!messageId.isNullOrBlank()) {
             processedMessageStatuses[messageId] = MessageStatus.READ.name
+        }
+        if (conversationId.isNotBlank()) {
+            conversationLastReadAt[conversationId] = now
         }
         val payload = JSONObject().apply {
             put("action", "READ_RECEIPT")
@@ -1571,10 +1767,13 @@ class GlobalRelayEngine(
             put("readerId", readerId)
             put("receiverId", readerId)
             put("status", MessageStatus.READ.name)
-            put("updatedAt", System.currentTimeMillis())
+            put("updatedAt", now)
         }
         postPayload("$baseTopic-user-$senderId", payload, cacheHeader = true)
         postPayload("$baseTopic-conv-$conversationId", payload, cacheHeader = true)
+        if (readerId.isNotBlank() && readerId != senderId) {
+            postPayload("$baseTopic-user-$readerId", payload, cacheHeader = true)
+        }
     }
 
     fun broadcastTyping(conversationId: String, userId: String, recipientId: String?, isTyping: Boolean) {
@@ -1592,14 +1791,19 @@ class GlobalRelayEngine(
         }
     }
 
+    suspend fun retryAllPendingOutgoingMessages(userId: String) {
+        flushPendingOutgoingMessagesForUser(userId)
+    }
+
     suspend fun synchronizeOfflineMessagesForUser(userId: String): Int = withContext(Dispatchers.IO) {
         val cleanUid = userId.trim()
         if (cleanUid.isBlank()) return@withContext 0
         try {
-            syncUserInboxFromCloud(cleanUid, forceFullHistory = true)
+            flushPendingOutgoingMessagesForUser(cleanUid)
+            syncUserInboxFromCloud(cleanUid, forceFullHistory = false)
             activeConversationId?.let { convId ->
                 if (convId.isNotBlank()) {
-                    syncConversationHistoryFromCloud(convId, forceFullHistory = true)
+                    syncConversationHistoryFromCloud(convId, forceFullHistory = false)
                 }
             }
         } catch (_: Exception) {
@@ -1726,6 +1930,11 @@ class GlobalRelayEngine(
     companion object {
         @Volatile
         private var INSTANCE: GlobalRelayEngine? = null
+
+        fun resetInstanceForTest() {
+            INSTANCE?.stop()
+            INSTANCE = null
+        }
 
         fun getInstance(context: Context): GlobalRelayEngine {
             return INSTANCE ?: synchronized(this) {

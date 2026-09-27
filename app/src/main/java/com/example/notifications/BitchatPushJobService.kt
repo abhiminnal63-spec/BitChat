@@ -33,7 +33,7 @@ class BitchatPushJobService : JobService() {
         BitchatNotificationManager.ensureNotificationChannel(applicationContext)
         val relay = GlobalRelayEngine.getInstance(applicationContext)
         val firestore = FirestoreSyncManager.getInstance(applicationContext)
-        relay.start(loggedInUid)
+        relay.ensurePushStreamConnected(loggedInUid)
         firestore.startSync(loggedInUid)
         BitchatPushService.ensureStarted(applicationContext, loggedInUid)
 
@@ -41,9 +41,11 @@ class BitchatPushJobService : JobService() {
             try {
                 firestore.synchronizeOfflineMessagesForUser(loggedInUid)
                 relay.synchronizeOfflineMessagesForUser(loggedInUid)
+                relay.retryAllPendingOutgoingMessages(loggedInUid)
             } catch (_: Exception) {
             } finally {
-                jobFinished(params, true)
+                scheduleKeepAliveJob(applicationContext)
+                jobFinished(params, false)
             }
         }
         return true

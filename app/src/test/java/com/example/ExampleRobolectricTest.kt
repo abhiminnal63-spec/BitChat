@@ -830,6 +830,32 @@ class ExampleRobolectricTest {
         // Verify Android 13+ permission denial tracking & notification settings intent
         val settingsIntent = com.example.notifications.BitchatNotificationManager.buildNotificationSettingsIntent(context)
         assertNotNull("Notification settings intent must be available", settingsIntent.action)
+
+        // 7. Verify Custom Material3 Brutalist Typography & High-Contrast Black-and-White Color Scheme
+        assertTrue("R.font.space_grotesk must exist", R.font.space_grotesk != 0)
+        assertTrue("R.font.space_mono must exist", R.font.space_mono != 0)
+        assertNotNull("BrutalistSansFontFamily must be defined", com.example.ui.theme.BrutalistSansFontFamily)
+        assertNotNull("BrutalistMonoFontFamily must be defined", com.example.ui.theme.BrutalistMonoFontFamily)
+        assertEquals(
+            androidx.compose.ui.text.font.FontWeight.Black,
+            com.example.ui.theme.Typography.displayLarge.fontWeight
+        )
+        assertEquals(
+            androidx.compose.ui.text.font.FontWeight.Black,
+            com.example.ui.theme.Typography.headlineLarge.fontWeight
+        )
+        assertEquals(
+            androidx.compose.ui.text.font.FontWeight.Bold,
+            com.example.ui.theme.Typography.bodyLarge.fontWeight
+        )
+        assertEquals(
+            androidx.compose.ui.graphics.Color(0xFF000000),
+            com.example.ui.theme.BrutalistPureBlack
+        )
+        assertEquals(
+            androidx.compose.ui.graphics.Color(0xFFFFFFFF),
+            com.example.ui.theme.BrutalistPureWhite
+        )
     }
 }
 

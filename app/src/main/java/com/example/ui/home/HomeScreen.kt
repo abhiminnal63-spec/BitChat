@@ -58,6 +58,8 @@ import com.example.ui.theme.BrutalistBadge
 import com.example.ui.theme.BrutalistBlack
 import com.example.ui.theme.BrutalistButton
 import com.example.ui.theme.BrutalistCard
+import com.example.ui.theme.BrutalistMonoFontFamily
+import com.example.ui.theme.BrutalistSansFontFamily
 import com.example.ui.theme.BrutalistWhite
 import com.example.ui.theme.EasappAccent
 import com.example.ui.theme.EasappBackground
@@ -145,7 +147,7 @@ fun HomeScreen(
                                         text = if (isNetworkConnected) "LIVE" else "OFFLINE",
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Black,
-                                        fontFamily = FontFamily.Monospace,
+                                        fontFamily = BrutalistMonoFontFamily,
                                         color = BrutalistBlack
                                     )
                                 }
@@ -154,7 +156,7 @@ fun HomeScreen(
                                 Text(
                                     text = "SESSION: @${currentUser?.username}",
                                     fontSize = 11.sp,
-                                    fontFamily = FontFamily.Monospace,
+                                    fontFamily = BrutalistMonoFontFamily,
                                     fontWeight = FontWeight.Bold,
                                     color = colors.textSecondary
                                 )
@@ -188,7 +190,7 @@ fun HomeScreen(
                                         text = "SWITCH",
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Black,
-                                        fontFamily = FontFamily.Monospace,
+                                        fontFamily = BrutalistMonoFontFamily,
                                         color = colors.accentOn
                                     )
                                 }
@@ -226,7 +228,7 @@ fun HomeScreen(
                                 text = "SEARCH CHATS OR @USERS...",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = BrutalistMonoFontFamily,
                                 color = colors.textSecondary
                             )
                         },
@@ -294,7 +296,7 @@ fun HomeScreen(
                                 Text(
                                     text = "CHATS (${conversations.size})",
                                     fontWeight = FontWeight.Black,
-                                    fontFamily = FontFamily.Monospace,
+                                    fontFamily = BrutalistMonoFontFamily,
                                     fontSize = 12.sp,
                                     color = if (isChatsActive) colors.accentOn else colors.textPrimary
                                 )
@@ -835,7 +837,7 @@ fun ConversationListItem(
                         text = item.otherUser.displayName,
                         fontWeight = FontWeight.Black,
                         fontSize = 14.sp,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = BrutalistSansFontFamily,
                         color = colors.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -843,7 +845,7 @@ fun ConversationListItem(
                     Text(
                         text = dateText,
                         fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = BrutalistMonoFontFamily,
                         color = colors.textSecondary
                     )
                 }
@@ -865,7 +867,7 @@ fun ConversationListItem(
                                 fontWeight = FontWeight.Bold,
                                 color = EasappSecondary,
                                 fontSize = 12.sp,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = BrutalistMonoFontFamily
                             )
                         } else {
                             if (isSenderMe && item.conversation.lastMessageText.isNotBlank()) {
@@ -879,7 +881,8 @@ fun ConversationListItem(
                                 text = item.conversation.lastMessageText.ifBlank { "Tap to send message" },
                                 fontSize = 12.sp,
                                 color = colors.textSecondary,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = BrutalistSansFontFamily,
+                                fontWeight = FontWeight.Bold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -898,7 +901,7 @@ fun ConversationListItem(
                                 text = "${item.unreadCount}",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Black,
-                                fontFamily = FontFamily.Monospace,
+                                fontFamily = BrutalistMonoFontFamily,
                                 color = colors.accentOn
                             )
                         }

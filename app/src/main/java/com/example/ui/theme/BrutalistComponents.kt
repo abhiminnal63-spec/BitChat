@@ -143,7 +143,7 @@ fun BrutalistButton(
                     fontWeight = FontWeight.Black,
                     fontSize = 14.sp,
                     letterSpacing = 1.sp,
-                    fontFamily = FontFamily.Monospace
+                    fontFamily = BrutalistMonoFontFamily
                 )
             }
         }
@@ -292,7 +292,7 @@ fun BrutalistAvatar(
                     color = BrutalistBlack,
                     fontWeight = FontWeight.Black,
                     fontSize = (size.value * 0.42f).sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = BrutalistSansFontFamily,
                     letterSpacing = (-1).sp
                 )
             }
@@ -388,7 +388,7 @@ fun EasappMediaImage(
                         text = "LOADING IMAGE...",
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Black,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = BrutalistMonoFontFamily,
                         color = colors.textSecondary
                     )
                 }
@@ -420,7 +420,7 @@ fun EasappMediaImage(
                             text = "TAP TO RELOAD IMAGE",
                             fontSize = 9.sp,
                             fontWeight = FontWeight.Black,
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = BrutalistMonoFontFamily,
                             color = colors.textPrimary
                         )
                     }
@@ -453,7 +453,7 @@ fun BrutalistBadge(
             color = textColor,
             fontSize = 11.sp,
             fontWeight = FontWeight.Black,
-            fontFamily = FontFamily.Monospace
+            fontFamily = BrutalistMonoFontFamily
         )
     }
 }
@@ -481,7 +481,7 @@ fun MessageStatusIndicator(
                             text = "FAILED • RETRY",
                             fontSize = 8.sp,
                             fontWeight = FontWeight.Black,
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = BrutalistMonoFontFamily,
                             color = EasappSecondary
                         )
                         Spacer(modifier = Modifier.width(3.dp))
@@ -501,7 +501,7 @@ fun MessageStatusIndicator(
                             text = "SENDING",
                             fontSize = 8.sp,
                             fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = BrutalistMonoFontFamily,
                             color = colors.textSecondary
                         )
                         Spacer(modifier = Modifier.width(3.dp))
@@ -521,7 +521,7 @@ fun MessageStatusIndicator(
                             text = "SENT",
                             fontSize = 8.sp,
                             fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = BrutalistMonoFontFamily,
                             color = colors.textSecondary
                         )
                         Spacer(modifier = Modifier.width(3.dp))
@@ -541,7 +541,7 @@ fun MessageStatusIndicator(
                             text = "DELIVERED",
                             fontSize = 8.sp,
                             fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = BrutalistMonoFontFamily,
                             color = colors.textSecondary
                         )
                         Spacer(modifier = Modifier.width(3.dp))
@@ -564,7 +564,7 @@ fun MessageStatusIndicator(
                             text = "SEEN",
                             fontSize = 9.sp,
                             fontWeight = FontWeight.Black,
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = BrutalistMonoFontFamily,
                             letterSpacing = 0.5.sp,
                             color = EasappReadBlue
                         )
@@ -626,7 +626,7 @@ fun BrutalistTypingIndicator(
                 color = BrutalistTheme.colors.textPrimary,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Black,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = BrutalistMonoFontFamily,
                 letterSpacing = 0.5.sp
             )
         }
