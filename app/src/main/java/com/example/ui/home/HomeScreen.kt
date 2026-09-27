@@ -85,6 +85,7 @@ fun HomeScreen(
     val directoryUsers by viewModel.directoryUsers.collectAsState()
     val allUsers by viewModel.allRegisteredUsers.collectAsState()
     val isNetworkConnected by viewModel.isNetworkConnected.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
     val focusManager = LocalFocusManager.current
     val colors = com.example.ui.theme.BrutalistTheme.colors
 
@@ -301,6 +302,54 @@ fun HomeScreen(
                         }
 
                         Spacer(modifier = Modifier.weight(1f))
+                    }
+
+                    // Android 13+ notification permission denied banner with direct Settings deep-link
+                    if (com.example.notifications.BitchatNotificationManager.isNotificationPermissionDenied(context)) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(EasappSecondary.copy(alpha = 0.14f), SharpCorner)
+                                .border(2.dp, EasappSecondary, SharpCorner)
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                                .testTag("notification_permission_denied_banner"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "System notifications are disabled.",
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                color = colors.textPrimary,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .background(colors.accent, SharpCorner)
+                                    .border(1.5.dp, colors.border, SharpCorner)
+                                    .clickable {
+                                        try {
+                                            context.startActivity(
+                                                com.example.notifications.BitchatNotificationManager.buildNotificationSettingsIntent(context)
+                                            )
+                                        } catch (_: Exception) {
+                                        }
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    .testTag("open_notification_settings_button")
+                            ) {
+                                Text(
+                                    text = "SETTINGS",
+                                    fontWeight = FontWeight.Black,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp,
+                                    color = colors.accentOn
+                                )
+                            }
+                        }
                     }
                 }
             }

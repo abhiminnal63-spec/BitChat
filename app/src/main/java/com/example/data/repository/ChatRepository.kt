@@ -408,14 +408,22 @@ class ChatRepository(
 
                 // Store message permanently FIRST, then dispatch FCM push notification to recipient's registered devices
                 try {
+                    val senderDisplayName = senderProfile?.displayName?.ifBlank { senderProfile.username } ?: "Contact"
                     val recipientDevices = DeviceTokenManager.getRegisteredDevicesForUser(
                         userId = message.recipientId,
                         userDao = userDao,
-                        firestoreSyncManager = firestoreSyncManager
+                        firestoreSyncManager = firestoreSyncManager,
+                        relayEngine = relayEngine
                     )
+                    val storedMessage = messageToPublish.copy(status = finalStatus)
                     firestoreSyncManager?.enqueuePushNotificationInCloud(
-                        message = messageToPublish.copy(status = finalStatus),
-                        senderDisplayName = senderProfile?.displayName?.ifBlank { senderProfile.username } ?: "Contact",
+                        message = storedMessage,
+                        senderDisplayName = senderDisplayName,
+                        devices = recipientDevices
+                    )
+                    relayEngine?.publishFcmPushNotification(
+                        message = storedMessage,
+                        senderDisplayName = senderDisplayName,
                         devices = recipientDevices
                     )
                 } catch (_: Exception) {

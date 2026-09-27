@@ -162,6 +162,7 @@ class UserRepository(
         isAppInForeground.value = true
         BitchatNotificationManager.setAppInForeground(true)
         val uid = _currentUserId.value ?: return
+        com.example.notifications.BitchatPushService.ensureStarted(appContext, uid)
         scope.launch {
             val now = System.currentTimeMillis()
             userDao.updateOnlineStatus(uid, true, now)
@@ -179,9 +180,11 @@ class UserRepository(
     fun onAppBackgrounded() {
         isAppInForeground.value = false
         BitchatNotificationManager.setAppInForeground(false)
+        RealtimeManager.clearAllActiveConversations()
         heartbeatJob?.cancel()
         heartbeatJob = null
         val uid = _currentUserId.value ?: return
+        com.example.notifications.BitchatPushService.ensureStarted(appContext, uid)
         scope.launch {
             val now = System.currentTimeMillis()
             userDao.updateOnlineStatus(uid, false, now)
@@ -530,6 +533,7 @@ class UserRepository(
         _currentUserId.value = user.id
         _currentUser.value = user
         saveLocalAuthenticatedSession(user, authVerifier)
+        com.example.notifications.BitchatPushService.ensureStarted(appContext, user.id)
         startPresenceHeartbeat()
     }
 

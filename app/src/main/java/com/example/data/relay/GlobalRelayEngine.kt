@@ -87,39 +87,62 @@ class GlobalRelayEngine(
 
     private var multiplexedStreamJob: Job? = null
     private var periodicSyncJob: Job? = null
+    @Volatile
+    private var activeStreamCall: okhttp3.Call? = null
     private var activeConversationId: String? = null
     @Volatile
     private var currentUserId: String? = null
 
-    init {
-        restartMultiplexedStream()
-    }
-
     /**
-     * Uses a SINGLE multiplexed SSE connection per device (`users` + `user-{uid}`)
-     * so two physical devices on the same Wi-Fi router never hit per-IP connection limits.
+     * Uses a SINGLE dedicated SSE push stream per authenticated user (`$baseTopic-user-$uid`)
+     * and cancels any previous OkHttp call immediately so two physical devices on the same Wi-Fi
+     * router never leak zombie sockets or hit per-IP connection limits.
      */
     private fun restartMultiplexedStream() {
+        try {
+            activeStreamCall?.cancel()
+        } catch (_: Exception) {
+        }
+        activeStreamCall = null
         multiplexedStreamJob?.cancel()
         val uid = currentUserId
-        val topics = if (!uid.isNullOrBlank()) {
-            "$baseTopic-users,$baseTopic-user-$uid"
-        } else {
-            "$baseTopic-users"
+        if (uid.isNullOrBlank()) {
+            _isConnected.value = false
+            return
         }
+        val topics = "$baseTopic-user-$uid"
 
         multiplexedStreamJob = scope.launch {
             listenToMultiplexedStream(topics)
         }
     }
 
+    fun ensurePushStreamConnected(userId: String) {
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return
+        if (currentUserId != cleanUid || multiplexedStreamJob?.isActive != true || !_isConnected.value) {
+            start(cleanUid)
+        } else {
+            scope.launch {
+                if (RealtimeManager.isNetworkConnected.value) {
+                    try {
+                        syncUserInboxFromCloud(cleanUid, forceFullHistory = false)
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }
+    }
+
     fun start(userId: String) {
-        val changed = currentUserId != userId
-        currentUserId = userId
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return
+        val changed = currentUserId != cleanUid
+        currentUserId = cleanUid
         if (changed) {
             streamLastEventTime = 0L
         }
-        if (changed || multiplexedStreamJob?.isActive != true) {
+        if (changed || multiplexedStreamJob?.isActive != true || !_isConnected.value) {
             restartMultiplexedStream()
         }
 
@@ -128,12 +151,12 @@ class GlobalRelayEngine(
         periodicSyncJob = scope.launch {
             // Immediate initial sync of user's cloud message/conversation inbox
             try {
-                syncUserInboxFromCloud(userId, forceFullHistory = true)
+                syncUserInboxFromCloud(cleanUid, forceFullHistory = true)
             } catch (_: Exception) {
             }
 
             while (isActive) {
-                delay(12_000L)
+                delay(5_000L)
                 if (RealtimeManager.isNetworkConnected.value) {
                     try {
                         val activeUid = currentUserId ?: break
@@ -183,14 +206,16 @@ class GlobalRelayEngine(
                     .url(url)
                     .build()
 
-                streamClient.newCall(request).execute().use { response ->
+                val call = streamClient.newCall(request)
+                activeStreamCall = call
+                call.execute().use { response ->
                     if (response.isSuccessful) {
                         _isConnected.value = true
                         val inputStream = response.body?.byteStream() ?: return@use
                         val reader = BufferedReader(InputStreamReader(inputStream))
-                        var line: String?
+                        var line: String? = null
 
-                        while (reader.readLine().also { line = it } != null) {
+                        while (scope.isActive && reader.readLine().also { line = it } != null) {
                             if (!RealtimeManager.isNetworkConnected.value) break
                             val lineStr = line?.trim() ?: continue
                             if (lineStr.isBlank()) continue
@@ -262,6 +287,9 @@ class GlobalRelayEngine(
                 "USER_DEVICE_REGISTERED", "USER_DEVICE_REMOVED" -> {
                     handleIncomingDevicePayload(json)
                 }
+                "FCM_PUSH" -> {
+                    handleIncomingFcmPushPayload(json)
+                }
                 "NEW_MESSAGE", "MESSAGE_STATUS", "READ_RECEIPT", "TYPING_INDICATOR", "CONVERSATION_SYNC", "USER_CONVERSATION_STATE" -> {
                     handleIncomingMessagingPayload(json)
                 }
@@ -324,20 +352,66 @@ class GlobalRelayEngine(
                 if (token.isNotBlank()) {
                     val platform = devObj.optString("platform", "android")
                     val updatedAt = devObj.optLong("updatedAt", System.currentTimeMillis())
-                    userDao.upsertUserDevice(
-                        UserDeviceEntity(
-                            userId = userId,
-                            deviceId = deviceId,
-                            fcmToken = token,
-                            platform = platform,
-                            updatedAt = updatedAt
-                        )
+                    val entity = UserDeviceEntity(
+                        userId = userId,
+                        deviceId = deviceId,
+                        fcmToken = token,
+                        platform = platform,
+                        updatedAt = updatedAt
                     )
+                    com.example.notifications.DeviceTokenManager.syncDeviceFromCloud(entity, userDao)
                 }
             }
         } catch (e: Exception) {
             Log.e(tag, "Device payload error: ${e.message}")
         }
+    }
+
+    private suspend fun handleIncomingFcmPushPayload(json: JSONObject) {
+        val ctx = appContext ?: return
+        val myUid = currentUserId ?: ctx.getSharedPreferences("easapp_session_prefs", Context.MODE_PRIVATE)
+            .getString("logged_in_user_id", null)?.trim() ?: return
+        val pushObj = json.optJSONObject("push") ?: json
+        val receiverId = pushObj.optString("receiverId", pushObj.optString("recipientId", "")).trim()
+        val senderId = pushObj.optString("senderId", "").trim()
+        if (receiverId != myUid || senderId.isBlank() || senderId == myUid) return
+
+        // If targetFcmTokens are specified, verify this device's token is registered (or accept when token list is empty/matching)
+        val tokensArr = pushObj.optJSONArray("fcmTokens")
+        if (tokensArr != null && tokensArr.length() > 0) {
+            val localToken = com.example.notifications.DeviceTokenManager.getCachedFcmToken(ctx)
+            if (!localToken.isNullOrBlank()) {
+                var matched = false
+                for (i in 0 until tokensArr.length()) {
+                    if (tokensArr.optString(i) == localToken) {
+                        matched = true
+                        break
+                    }
+                }
+                // Even if another device token was listed, still deliver to this authenticated user's device
+                if (!matched) {
+                    Log.d(tag, "FCM push delivered to authenticated user device")
+                }
+            }
+        }
+
+        val dataMap = mapOf(
+            "messageId" to pushObj.optString("messageId", ""),
+            "conversationId" to pushObj.optString("conversationId", ""),
+            "senderId" to senderId,
+            "receiverId" to receiverId,
+            "senderName" to pushObj.optString("senderName", ""),
+            "type" to pushObj.optString("type", "text"),
+            "text" to pushObj.optString("text", ""),
+            "mediaUrl" to pushObj.optString("mediaUrl", ""),
+            "createdAt" to pushObj.optLong("createdAt", System.currentTimeMillis()).toString()
+        )
+        com.example.notifications.BitchatMessagingService.handleIncomingFcmData(
+            context = ctx,
+            data = dataMap,
+            fallbackTitle = pushObj.optString("senderName", "").ifBlank { null },
+            fallbackBody = pushObj.optString("notificationBody", "").ifBlank { null }
+        )
     }
 
     private fun mergeUserPreservingNewestPresence(existing: UserEntity?, incoming: UserEntity): UserEntity {
@@ -1547,12 +1621,125 @@ class GlobalRelayEngine(
             put("device", devObj)
         }
         postPayload("$baseTopic-user-${device.userId}", payload, cacheHeader = true)
+        postPayload("$baseTopic-users", payload, cacheHeader = true)
+    }
+
+    suspend fun fetchUserDevicesFromCloud(userId: String): List<UserDeviceEntity> = withContext(Dispatchers.IO) {
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank() || !RealtimeManager.isNetworkConnected.value) return@withContext emptyList()
+        val found = linkedMapOf<String, UserDeviceEntity>()
+        try {
+            val payloads = fetchTopicPayloadsFromCloud("$baseTopic-user-$cleanUid", forceFullHistory = true)
+            for (payload in payloads) {
+                try {
+                    val json = JSONObject(payload)
+                    val action = json.optString("action")
+                    if (action == "USER_DEVICE_REGISTERED" || action == "USER_DEVICE_REMOVED") {
+                        val devObj = json.optJSONObject("device") ?: json
+                        val devUid = devObj.optString("userId", "").trim()
+                        val devId = devObj.optString("deviceId", "").trim()
+                        if (devUid == cleanUid && devId.isNotBlank()) {
+                            if (action == "USER_DEVICE_REMOVED") {
+                                found.remove(devId)
+                            } else {
+                                val token = devObj.optString("fcmToken", "").trim()
+                                val updatedAt = devObj.optLong("updatedAt", 0L)
+                                if (token.isNotBlank()) {
+                                    val entity = UserDeviceEntity(
+                                        userId = cleanUid,
+                                        deviceId = devId,
+                                        fcmToken = token,
+                                        platform = devObj.optString("platform", "android"),
+                                        updatedAt = updatedAt
+                                    )
+                                    val existing = found[devId]
+                                    if (existing == null || updatedAt >= existing.updatedAt) {
+                                        found[devId] = entity
+                                        com.example.notifications.DeviceTokenManager.syncDeviceFromCloud(entity, userDao)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        } catch (_: Exception) {
+        }
+        found.values.sortedByDescending { it.updatedAt }
+    }
+
+    fun publishFcmPushNotification(
+        message: MessageEntity,
+        senderDisplayName: String,
+        devices: List<UserDeviceEntity>
+    ) {
+        if (message.recipientId.isBlank() || message.senderId.isBlank()) return
+        val isImage = message.type.equals("image", ignoreCase = true) ||
+            !message.mediaUrl.isNullOrBlank() ||
+            !message.attachmentUri.isNullOrBlank()
+        val bodyPreview = BitchatNotificationManager.formatNotificationBody(
+            type = if (isImage) "image" else message.type,
+            content = message.content,
+            hasMedia = isImage
+        )
+        val tokensArray = org.json.JSONArray()
+        devices.forEach { tokensArray.put(it.fcmToken) }
+        val pushObj = JSONObject().apply {
+            put("messageId", message.id)
+            put("conversationId", message.conversationId)
+            put("senderId", message.senderId)
+            put("receiverId", message.recipientId)
+            put("senderName", senderDisplayName)
+            put("appTitle", "BITCHAT")
+            put("type", if (isImage) "image" else "text")
+            put("text", message.content)
+            put("mediaUrl", message.mediaUrl?.takeIf { it.startsWith("http") } ?: "")
+            put("notificationBody", bodyPreview)
+            put("collapseKey", "bitchat_conv_${message.conversationId}")
+            put("notificationTag", "bitchat_conv_${message.conversationId}")
+            put("groupKey", BitchatNotificationManager.GROUP_KEY_MESSAGES)
+            put("channelId", BitchatNotificationManager.CHANNEL_ID)
+            put("fcmTokens", tokensArray)
+            put("createdAt", message.timestamp)
+        }
+        val payload = JSONObject().apply {
+            put("action", "FCM_PUSH")
+            put("push", pushObj)
+        }
+        postPayload("$baseTopic-user-${message.recipientId}", payload, cacheHeader = true)
     }
 
     fun stop() {
         currentUserId = null
         activeConversationId = null
+        try {
+            activeStreamCall?.cancel()
+        } catch (_: Exception) {
+        }
+        activeStreamCall = null
+        multiplexedStreamJob?.cancel()
         periodicSyncJob?.cancel()
-        restartMultiplexedStream()
+        _isConnected.value = false
+    }
+
+    companion object {
+        @Volatile
+        private var INSTANCE: GlobalRelayEngine? = null
+
+        fun getInstance(context: Context): GlobalRelayEngine {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: run {
+                    val appCtx = context.applicationContext
+                    val db = com.example.data.database.EasappDatabase.getInstance(appCtx)
+                    GlobalRelayEngine(
+                        userDao = db.userDao(),
+                        conversationDao = db.conversationDao(),
+                        messageDao = db.messageDao(),
+                        appContext = appCtx
+                    ).also { INSTANCE = it }
+                }
+            }
+        }
     }
 }

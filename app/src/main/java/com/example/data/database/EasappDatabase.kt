@@ -93,6 +93,10 @@ abstract class EasappDatabase : RoomDatabase() {
             }
         }
 
+        fun setInstanceForTest(db: EasappDatabase?) {
+            INSTANCE = db
+        }
+
         fun getInstance(context: Context): EasappDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(

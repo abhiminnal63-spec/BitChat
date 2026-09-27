@@ -9,8 +9,11 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
@@ -25,19 +28,23 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 object BitchatNotificationManager {
-    const val CHANNEL_ID = "bitchat_messages_channel"
+    const val CHANNEL_ID = "messages"
+    const val LEGACY_CHANNEL_ID = "bitchat_messages_channel"
     const val CHANNEL_NAME = "BITCHAT Messages"
     const val GROUP_KEY_MESSAGES = "com.example.bitchat.MESSAGE_GROUP"
     const val SUMMARY_NOTIFICATION_ID = 900000
 
     const val EXTRA_CONVERSATION_ID = "extra_conversation_id"
     const val EXTRA_OTHER_USER_ID = "extra_other_user_id"
+    const val EXTRA_SENDER_UID = "senderUid"
+    const val EXTRA_CONVERSATION_ID_KEY = "conversationId"
     const val EXTRA_SENDER_NAME = "extra_sender_name"
     const val EXTRA_FROM_NOTIFICATION = "extra_from_notification"
 
     private const val PREFS_NAME = "bitchat_notified_messages_prefs"
     private const val KEY_NOTIFIED_IDS = "notified_message_ids"
     private const val KEY_GROUPED_CONV_LINES = "grouped_conversation_lines_v1"
+    private const val KEY_PERMISSION_EXPLICITLY_DENIED = "post_notifications_explicitly_denied"
 
     data class QueuedNotificationLine(
         val messageId: String,
@@ -51,6 +58,52 @@ object BitchatNotificationManager {
 
     fun setAppInForeground(inForeground: Boolean) {
         RealtimeManager.setAppInForeground(inForeground)
+    }
+
+    fun setNotificationPermissionDenied(context: Context, denied: Boolean) {
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_PERMISSION_EXPLICITLY_DENIED, denied)
+            .apply()
+    }
+
+    fun isNotificationPermissionDenied(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val explicitlyDenied = context.applicationContext
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(KEY_PERMISSION_EXPLICITLY_DENIED, false)
+            if (explicitlyDenied) {
+                return ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            }
+        }
+        return false
+    }
+
+    fun areNotificationsEnabled(context: Context): Boolean {
+        if (isNotificationPermissionDenied(context)) return false
+        return try {
+            NotificationManagerCompat.from(context).areNotificationsEnabled()
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    fun buildNotificationSettingsIntent(context: Context): Intent {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        } else {
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", context.packageName, null)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        }
     }
 
     // Tracks grouped unread messages per conversation/contact for WhatsApp-style MessagingStyle consolidation
@@ -229,14 +282,16 @@ object BitchatNotificationManager {
         context: Context,
         conversationId: String,
         otherUserId: String,
-        senderName: String
+        senderName: String = ""
     ): Intent {
         return Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                 Intent.FLAG_ACTIVITY_CLEAR_TOP or
                 Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(EXTRA_CONVERSATION_ID, conversationId)
+            putExtra(EXTRA_CONVERSATION_ID_KEY, conversationId)
             putExtra(EXTRA_OTHER_USER_ID, otherUserId)
+            putExtra(EXTRA_SENDER_UID, otherUserId)
             putExtra(EXTRA_SENDER_NAME, senderName)
             putExtra(EXTRA_FROM_NOTIFICATION, true)
         }
@@ -303,6 +358,11 @@ object BitchatNotificationManager {
         val cleanMsgId = message.id.trim()
         if (cleanRecipient.isBlank() || cleanConvId.isBlank() || cleanMsgId.isBlank()) return false
         if (cleanSender == cleanRecipient) return false
+
+        // Do not pretend notifications are working if POST_NOTIFICATIONS permission was denied on Android 13+
+        if (isNotificationPermissionDenied(context)) {
+            return false
+        }
 
         // CASE 1: @brutt is online and actively inside the conversation -> do not create duplicate notification
         if (shouldSuppressNotificationForActiveConversation(cleanRecipient, cleanConvId) ||
@@ -391,8 +451,15 @@ object BitchatNotificationManager {
         val summaryLinesArray = linesForConv.map { it.displayBody }.toTypedArray<CharSequence>()
         val summaryLinesText = linesForConv.joinToString("\n") { it.displayBody }
 
+        val largeIconBitmap = try {
+            BitmapFactory.decodeResource(context.resources, R.mipmap.ic_launcher)
+        } catch (_: Exception) {
+            null
+        }
+
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_bitchat)
+            .setLargeIcon(largeIconBitmap)
             .setSubText("BITCHAT")
             .setContentTitle(resolvedSenderName)
             .setContentText(latestLine.displayBody)
@@ -400,6 +467,7 @@ object BitchatNotificationManager {
             .setStyle(messagingStyle)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
@@ -410,7 +478,9 @@ object BitchatNotificationManager {
             .addExtras(
                 Bundle().apply {
                     putString(EXTRA_CONVERSATION_ID, cleanConvId)
+                    putString(EXTRA_CONVERSATION_ID_KEY, cleanConvId)
                     putString(EXTRA_OTHER_USER_ID, cleanSender)
+                    putString(EXTRA_SENDER_UID, cleanSender)
                     putString(EXTRA_SENDER_NAME, resolvedSenderName)
                     putString("bitchat_app_header", "BITCHAT")
                     putString("bitchat_grouped_lines", summaryLinesText)
@@ -464,7 +534,7 @@ object BitchatNotificationManager {
             }
 
         val summaryBuilder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_bitchat)
             .setSubText("BITCHAT")
             .setContentTitle("BITCHAT")
             .setContentText(summaryText)
@@ -472,6 +542,7 @@ object BitchatNotificationManager {
             .setStyle(summaryInboxStyle)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setGroup(GROUP_KEY_MESSAGES)
             .setGroupSummary(true)
             .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)

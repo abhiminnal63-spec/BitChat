@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Monochrome BITCHAT notification status bar icon with transparent background, eye cutouts, and burst wedges -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M26.0,26.0 L30.5,22.2 L71.0,30.2 L82.2,41.5 L82.2,67.2 L75.2,72.5 L79.1,88.6 L60.4,69.8 L36.6,65.2 L26.0,55.0 Z M39.5,39.0 A4.2,4.2 0 0,1 47.9,39.0 L47.9,52.0 A4.2,4.2 0 0,1 39.5,52.0 Z M59.5,41.8 A4.2,4.2 0 0,1 67.9,41.8 L67.9,54.8 A4.2,4.2 0 0,1 59.5,54.8 Z M70.5,13.0 L77.0,13.0 L74.6,28.2 L72.1,28.2 Z M87.8,19.0 L92.6,23.6 L79.8,33.4 L78.2,31.8 Z M83.0,37.4 L95.0,35.0 L95.0,41.6 L83.0,39.6 Z" />
+</vector>

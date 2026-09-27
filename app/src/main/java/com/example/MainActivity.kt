@@ -82,15 +82,25 @@ class MainActivity : ComponentActivity() {
 
     private fun extractNotificationDeepLink(intent: Intent?) {
         if (intent == null) return
-        val convId = intent.getStringExtra(BitchatNotificationManager.EXTRA_CONVERSATION_ID)?.trim().orEmpty()
-        val otherId = intent.getStringExtra(BitchatNotificationManager.EXTRA_OTHER_USER_ID)?.trim().orEmpty()
+        val convId = (
+            intent.getStringExtra(BitchatNotificationManager.EXTRA_CONVERSATION_ID)
+                ?: intent.getStringExtra(BitchatNotificationManager.EXTRA_CONVERSATION_ID_KEY)
+            )?.trim().orEmpty()
+        val otherId = (
+            intent.getStringExtra(BitchatNotificationManager.EXTRA_OTHER_USER_ID)
+                ?: intent.getStringExtra(BitchatNotificationManager.EXTRA_SENDER_UID)
+                ?: intent.getStringExtra("senderId")
+            )?.trim().orEmpty()
         if (convId.isNotBlank() || otherId.isNotBlank()) {
             _pendingDeepLink.value = NotificationDeepLinkTarget(
                 conversationId = convId,
                 otherUserId = otherId
             )
             intent.removeExtra(BitchatNotificationManager.EXTRA_CONVERSATION_ID)
+            intent.removeExtra(BitchatNotificationManager.EXTRA_CONVERSATION_ID_KEY)
             intent.removeExtra(BitchatNotificationManager.EXTRA_OTHER_USER_ID)
+            intent.removeExtra(BitchatNotificationManager.EXTRA_SENDER_UID)
+            intent.removeExtra("senderId")
         }
     }
 
@@ -105,18 +115,8 @@ class MainActivity : ComponentActivity() {
         extractNotificationDeepLink(intent)
 
         val database = EasappDatabase.getInstance(applicationContext)
-        val globalRelayEngine = com.example.data.relay.GlobalRelayEngine(
-            userDao = database.userDao(),
-            conversationDao = database.conversationDao(),
-            messageDao = database.messageDao(),
-            appContext = applicationContext
-        )
-        val firestoreSyncManager = FirestoreSyncManager(
-            context = applicationContext,
-            userDao = database.userDao(),
-            conversationDao = database.conversationDao(),
-            messageDao = database.messageDao()
-        )
+        val globalRelayEngine = com.example.data.relay.GlobalRelayEngine.getInstance(applicationContext)
+        val firestoreSyncManager = FirestoreSyncManager.getInstance(applicationContext)
         val userRepository = UserRepository(
             userDao = database.userDao(),
             context = applicationContext,
@@ -177,19 +177,27 @@ fun EasappApp(
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
-        onResult = { /* Permission granted or denied */ }
+        onResult = { granted ->
+            BitchatNotificationManager.setNotificationPermissionDenied(context, !granted)
+        }
     )
 
     LaunchedEffect(currentUserId) {
-        if (currentUserId != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val hasPerm = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!hasPerm) {
-                try {
-                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                } catch (_: Exception) {
+        val uid = currentUserId
+        if (uid != null) {
+            com.example.notifications.BitchatPushService.ensureStarted(context, uid)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val hasPerm = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasPerm) {
+                    BitchatNotificationManager.setNotificationPermissionDenied(context, false)
+                } else {
+                    try {
+                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    } catch (_: Exception) {
+                    }
                 }
             }
         }

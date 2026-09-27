@@ -9,6 +9,7 @@ import com.example.data.model.MessageEntity
 import com.example.data.model.MessageStatus
 import com.example.data.model.buildDeterministicConversationId
 import com.example.data.realtime.RealtimeManager
+import com.example.data.relay.GlobalRelayEngine
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import kotlinx.coroutines.CoroutineScope
@@ -30,18 +31,15 @@ class BitchatMessagingService : FirebaseMessagingService() {
 
         serviceScope.launch {
             val db = EasappDatabase.getInstance(applicationContext)
-            val fs = FirestoreSyncManager(
-                context = applicationContext,
-                userDao = db.userDao(),
-                conversationDao = db.conversationDao(),
-                messageDao = db.messageDao()
-            )
+            val fs = FirestoreSyncManager.getInstance(applicationContext)
+            val relay = GlobalRelayEngine.getInstance(applicationContext)
             DeviceTokenManager.registerDeviceForUser(
                 context = applicationContext,
                 userId = currentUserId,
                 fcmTokenOverride = token,
                 userDao = db.userDao(),
-                firestoreSyncManager = fs
+                firestoreSyncManager = fs,
+                relayEngine = relay
             )
         }
     }
@@ -129,6 +127,22 @@ class BitchatMessagingService : FirebaseMessagingService() {
 
             val existingMsg = msgDao.getMessageByIdDirect(messageId)
             msgDao.upsertMessageSafely(incomingMsg)
+
+            // Acknowledge DELIVERED status back to shared backend (never SEEN/READ unless actively viewing)
+            if (existingMsg == null || existingMsg.status == MessageStatus.SENT.name || existingMsg.status == MessageStatus.SENDING.name) {
+                try {
+                    FirestoreSyncManager.getInstance(appContext)
+                        .updateMessageStatusInCloud(conversationId, messageId, statusToPersist)
+                    GlobalRelayEngine.getInstance(appContext).broadcastMessageStatus(
+                        conversationId = conversationId,
+                        messageId = messageId,
+                        receiverId = loggedInUid,
+                        senderId = senderId,
+                        status = statusToPersist
+                    )
+                } catch (_: Exception) {
+                }
+            }
 
             val sorted = listOf(senderId, receiverId).sorted()
             val previewText = when {

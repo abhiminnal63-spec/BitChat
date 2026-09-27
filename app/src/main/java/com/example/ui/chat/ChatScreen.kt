@@ -149,10 +149,26 @@ fun ChatScreen(
         }
     }
 
-    // Auto mark as read and manage lifecycle
-    DisposableEffect(Unit) {
+    // Auto mark as read when visible and clear active conversation state when minimized or locked
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, viewModel) {
         viewModel.onEnterScreen()
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_START,
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> {
+                    viewModel.onEnterScreen()
+                }
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE,
+                androidx.lifecycle.Lifecycle.Event.ON_STOP -> {
+                    viewModel.onExitScreen()
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
             viewModel.onExitScreen()
         }
     }

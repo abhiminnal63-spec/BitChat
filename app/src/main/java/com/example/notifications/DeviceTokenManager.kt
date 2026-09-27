@@ -110,10 +110,25 @@ object DeviceTokenManager {
         entity
     }
 
+    suspend fun syncDeviceFromCloud(
+        device: UserDeviceEntity,
+        userDao: UserDao? = null
+    ) {
+        if (device.userId.isBlank() || device.deviceId.isBlank() || device.fcmToken.isBlank()) return
+        if (invalidTokens.contains(device.fcmToken)) return
+        val map = inMemoryUserDevices.getOrPut(device.userId) { ConcurrentHashMap() }
+        val existing = map[device.deviceId]
+        if (existing == null || device.updatedAt >= existing.updatedAt) {
+            map[device.deviceId] = device
+            userDao?.upsertUserDevice(device)
+        }
+    }
+
     suspend fun getRegisteredDevicesForUser(
         userId: String,
         userDao: UserDao? = null,
-        firestoreSyncManager: FirestoreSyncManager? = null
+        firestoreSyncManager: FirestoreSyncManager? = null,
+        relayEngine: GlobalRelayEngine? = null
     ): List<UserDeviceEntity> = withContext(Dispatchers.IO) {
         val cleanUid = userId.trim()
         if (cleanUid.isBlank()) return@withContext emptyList()
@@ -143,6 +158,20 @@ object DeviceTokenManager {
                     merged[dev.deviceId] = dev
                     userDao?.upsertUserDevice(dev)
                     inMemoryUserDevices.getOrPut(cleanUid) { ConcurrentHashMap() }[dev.deviceId] = dev
+                }
+            }
+        }
+
+        if (merged.isEmpty() && relayEngine != null) {
+            val relayDevices = relayEngine.fetchUserDevicesFromCloud(cleanUid)
+            for (dev in relayDevices) {
+                if (!invalidTokens.contains(dev.fcmToken)) {
+                    val existing = merged[dev.deviceId]
+                    if (existing == null || dev.updatedAt >= existing.updatedAt) {
+                        merged[dev.deviceId] = dev
+                        userDao?.upsertUserDevice(dev)
+                        inMemoryUserDevices.getOrPut(cleanUid) { ConcurrentHashMap() }[dev.deviceId] = dev
+                    }
                 }
             }
         }

@@ -1,0 +1,13 @@
+{
+  "name": "bitchat-cloud-functions",
+  "version": "1.0.0",
+  "description": "Server-side Firebase Cloud Functions for BITCHAT FCM push notifications",
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.1.0",
+    "firebase-functions": "^5.0.1"
+  }
+}

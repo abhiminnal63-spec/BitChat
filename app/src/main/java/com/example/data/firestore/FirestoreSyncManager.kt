@@ -254,8 +254,68 @@ class FirestoreSyncManager(
                     }
                 }
             listeners.add(convReg)
+
+            // 3. Listen to FCM push notification queue for this recipient device
+            listenToFcmPushQueueForUser(currentUserId)
         } catch (e: Exception) {
             Log.e(tag, "Error starting sync: ${e.message}")
+        }
+    }
+
+    private fun listenToFcmPushQueueForUser(currentUserId: String) {
+        val db = firestore ?: return
+        try {
+            val pushReg = db.collection("push_notifications")
+                .whereEqualTo("receiverId", currentUserId)
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null) {
+                        Log.e(tag, "Push queue listener error: ${error.message}")
+                        return@addSnapshotListener
+                    }
+                    if (snapshot != null) {
+                        scope.launch {
+                            for (doc in snapshot.documents) {
+                                try {
+                                    val senderId = doc.getString("senderId") ?: ""
+                                    val receiverId = doc.getString("receiverId") ?: ""
+                                    if (senderId.isBlank() || receiverId != currentUserId || senderId == currentUserId) continue
+                                    val msgId = doc.getString("messageId") ?: doc.id
+                                    val convId = doc.getString("conversationId")
+                                        ?: buildDeterministicConversationId(senderId, receiverId)
+                                    val senderName = doc.getString("senderName") ?: "Contact"
+                                    val type = doc.getString("type") ?: "text"
+                                    val text = doc.getString("text") ?: ""
+                                    val mediaUrl = doc.getString("mediaUrl") ?: ""
+                                    val createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                                    val notifBody = doc.getString("notificationBody") ?: text
+
+                                    val dataMap = mapOf(
+                                        "messageId" to msgId,
+                                        "conversationId" to convId,
+                                        "senderId" to senderId,
+                                        "receiverId" to receiverId,
+                                        "senderName" to senderName,
+                                        "type" to type,
+                                        "text" to text,
+                                        "mediaUrl" to mediaUrl,
+                                        "createdAt" to createdAt.toString()
+                                    )
+                                    com.example.notifications.BitchatMessagingService.handleIncomingFcmData(
+                                        context = context.applicationContext,
+                                        data = dataMap,
+                                        fallbackTitle = senderName,
+                                        fallbackBody = notifBody
+                                    )
+                                } catch (e: Exception) {
+                                    Log.e(tag, "FCM push doc parse error: ${e.message}")
+                                }
+                            }
+                        }
+                    }
+                }
+            listeners.add(pushReg)
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to listen to FCM push queue: ${e.message}")
         }
     }
 
@@ -391,20 +451,8 @@ class FirestoreSyncManager(
                                     )
                                     messageDao.upsertMessageSafely(message)
                                     conversationDao.updateLastMessageStatus(canonicalConvId, effectiveStatus)
-
-                                    if (recipientId == currentUserId && existingMsg == null && effectiveStatus != MessageStatus.READ.name) {
-                                        val senderProfile = userDao.getUserByIdDirect(senderId)
-                                        val senderName = doc.getString("senderName")?.takeIf { it.isNotBlank() }
-                                            ?: senderProfile?.displayName?.takeIf { it.isNotBlank() }
-                                            ?: senderProfile?.username?.takeIf { it.isNotBlank() }
-                                            ?: "Contact"
-                                        BitchatNotificationManager.showIncomingMessageNotification(
-                                            context = context,
-                                            recipientId = currentUserId,
-                                            message = message,
-                                            senderDisplayName = senderName
-                                        )
-                                    }
+                                    // Note: Firestore realtime conversation listeners update the chat UI only;
+                                    // Android system notifications are delivered via FCM push notifications.
                                 } catch (e: Exception) {
                                     Log.e(tag, "Message parse error: ${e.message}")
                                 }
@@ -947,5 +995,25 @@ class FirestoreSyncManager(
             listener.remove()
         }
         profileListeners.clear()
+    }
+
+    companion object {
+        @Volatile
+        private var INSTANCE: FirestoreSyncManager? = null
+
+        fun getInstance(context: Context): FirestoreSyncManager {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: run {
+                    val appCtx = context.applicationContext
+                    val db = com.example.data.database.EasappDatabase.getInstance(appCtx)
+                    FirestoreSyncManager(
+                        context = appCtx,
+                        userDao = db.userDao(),
+                        conversationDao = db.conversationDao(),
+                        messageDao = db.messageDao()
+                    ).also { INSTANCE = it }
+                }
+            }
+        }
     }
 }

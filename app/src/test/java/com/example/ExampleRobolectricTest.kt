@@ -49,11 +49,13 @@ class ExampleRobolectricTest {
         database = Room.inMemoryDatabaseBuilder(context, EasappDatabase::class.java)
             .allowMainThreadQueries()
             .build()
+        EasappDatabase.setInstanceForTest(database)
         RealtimeManager.setNetworkConnected(true)
     }
 
     @After
     fun tearDown() {
+        EasappDatabase.setInstanceForTest(null)
         database.close()
         RealtimeManager.setNetworkConnected(true)
     }
@@ -468,9 +470,22 @@ class ExampleRobolectricTest {
 
     @Test
     fun bitchatBrandingAndOfflinePushNotifications_verified() = runBlocking {
-        // 1. Verify BITCHAT application label, notification channel name, font resource, and launcher icons
+        // 1. Verify BITCHAT application label, notification channel ID ("messages"), channel name ("BITCHAT Messages"), and launcher icons
         assertEquals("BITCHAT", context.getString(R.string.app_name))
+        assertEquals("messages", com.example.notifications.BitchatNotificationManager.CHANNEL_ID)
         assertEquals("BITCHAT Messages", com.example.notifications.BitchatNotificationManager.CHANNEL_NAME)
+        com.example.notifications.BitchatNotificationManager.ensureNotificationChannel(context)
+        val nmForChannel = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val channel = nmForChannel.getNotificationChannel("messages")
+            assertNotNull("Android notification channel 'messages' must exist", channel)
+            assertEquals("BITCHAT Messages", channel.name.toString())
+            assertEquals(android.app.NotificationManager.IMPORTANCE_HIGH, channel.importance)
+        }
+        assertNotNull(
+            "Monochrome notification icon ic_stat_bitchat must exist",
+            androidx.core.content.ContextCompat.getDrawable(context, R.drawable.ic_stat_bitchat)
+        )
         assertNotNull("Shooting Star FontFamily must be defined", com.example.ui.theme.ShootingStarFontFamily)
         assertTrue("R.font.shooting_star_bold resource ID must be valid", R.font.shooting_star_bold != 0)
         val fontFileExists = java.io.File("src/main/res/font/shooting_star_bold.otf").exists() ||
@@ -752,11 +767,69 @@ class ExampleRobolectricTest {
         val summaryNotif = shadowNm.getNotification(com.example.notifications.BitchatNotificationManager.SUMMARY_NOTIFICATION_ID)
         assertNotNull("Group summary notification must be posted when multiple contacts have active notifications", summaryNotif)
 
-        // 6. Verify notification tap does NOT mark message as READ (SEEN) — only opening the conversation does
-        msgDao.advanceMessageStatus(msg1.id, MessageStatus.DELIVERED.name)
-        val afterDelivery = msgDao.getMessageByIdDirect(msg1.id)
-        assertEquals(MessageStatus.DELIVERED.name, afterDelivery?.status)
-        assertNotEquals("Push notification delivery must NEVER mark message as READ", MessageStatus.READ.name, afterDelivery?.status)
+        // 6. Verify FCM push handler delivers notification & persists message as DELIVERED (never READ/SEEN) when BITCHAT is completely closed
+        context.getSharedPreferences("easapp_session_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putString("logged_in_user_id", bruttUid)
+            .commit()
+
+        val fcmPushHandled = com.example.notifications.BitchatMessagingService.handleIncomingFcmData(
+            context = context,
+            data = mapOf(
+                "messageId" to "msg_fcm_closed_1",
+                "conversationId" to convAbhiBrutt,
+                "senderId" to abhiUid,
+                "receiverId" to bruttUid,
+                "senderName" to "Abhi",
+                "type" to "text",
+                "text" to "Hello Brutt",
+                "createdAt" to (now + 400L).toString()
+            )
+        )
+        assertTrue("FCM push must post Android system notification while BITCHAT is closed", fcmPushHandled)
+        val persistedFromClosedPush = msgDao.getMessageByIdDirect("msg_fcm_closed_1")
+        assertNotNull("Message received via FCM while BITCHAT is closed must be stored in DB", persistedFromClosedPush)
+        assertEquals("Hello Brutt", persistedFromClosedPush?.content)
+        assertEquals(
+            "Receiving a push notification must mark message as DELIVERED, never READ/SEEN",
+            MessageStatus.DELIVERED.name,
+            persistedFromClosedPush?.status
+        )
+
+        // Verify image FCM push displays "📷 Photo"
+        val fcmImageHandled = com.example.notifications.BitchatMessagingService.handleIncomingFcmData(
+            context = context,
+            data = mapOf(
+                "messageId" to "msg_fcm_closed_img",
+                "conversationId" to convAbhiBrutt,
+                "senderId" to abhiUid,
+                "receiverId" to bruttUid,
+                "senderName" to "Abhi",
+                "type" to "image",
+                "text" to "",
+                "mediaUrl" to "https://example.com/photo.jpg",
+                "createdAt" to (now + 500L).toString()
+            )
+        )
+        assertTrue("Image FCM push must update consolidated notification while BITCHAT is closed", fcmImageHandled)
+        val latestAbhiLines = com.example.notifications.BitchatNotificationManager.getConversationMessagesForTest(convAbhiBrutt)
+        assertEquals("📷 Photo", latestAbhiLines.last().body)
+
+        // Verify notification tap intent passes both conversationId and senderUid directly to MainActivity
+        val tapIntent = com.example.notifications.BitchatNotificationManager.buildConversationTapIntent(
+            context = context,
+            conversationId = convAbhiBrutt,
+            otherUserId = abhiUid,
+            senderName = "Abhi"
+        )
+        assertEquals(convAbhiBrutt, tapIntent.getStringExtra("conversationId"))
+        assertEquals(abhiUid, tapIntent.getStringExtra("senderUid"))
+        assertEquals(convAbhiBrutt, tapIntent.getStringExtra(com.example.notifications.BitchatNotificationManager.EXTRA_CONVERSATION_ID))
+        assertEquals(abhiUid, tapIntent.getStringExtra(com.example.notifications.BitchatNotificationManager.EXTRA_OTHER_USER_ID))
+
+        // Verify Android 13+ permission denial tracking & notification settings intent
+        val settingsIntent = com.example.notifications.BitchatNotificationManager.buildNotificationSettingsIntent(context)
+        assertNotNull("Notification settings intent must be available", settingsIntent.action)
     }
 }
 

@@ -74,6 +74,8 @@ class ChatViewModel(
 
     private var typingDebounceJob: Job? = null
     private var profileFetchJob: Job? = null
+    @Volatile
+    private var isScreenActive: Boolean = false
 
     init {
         onEnterScreen()
@@ -88,9 +90,10 @@ class ChatViewModel(
             }
         }
 
-        // Automatically mark incoming messages as READ while the conversation is open
+        // Automatically mark incoming messages as READ ONLY while the conversation is actively open in the foreground
         viewModelScope.launch {
             messages.collect { list ->
+                if (!isScreenActive || !RealtimeManager.isAppInForeground.value) return@collect
                 val myId = currentUserId.value ?: return@collect
                 val hasUnreadIncoming = list.any {
                     it.recipientId == myId && it.status != MessageStatus.READ.name
@@ -126,16 +129,20 @@ class ChatViewModel(
     }
 
     fun onEnterScreen() {
+        isScreenActive = true
         val myId = currentUserId.value ?: return
         RealtimeManager.setUserActiveConversation(myId, conversationId)
         chatRepository.enterConversationScreen(conversationId, myId)
         loadRecipientProfile()
-        viewModelScope.launch {
-            chatRepository.markConversationAsRead(conversationId, myId)
+        if (RealtimeManager.isAppInForeground.value) {
+            viewModelScope.launch {
+                chatRepository.markConversationAsRead(conversationId, myId)
+            }
         }
     }
 
     fun onExitScreen() {
+        isScreenActive = false
         typingDebounceJob?.cancel()
         typingDebounceJob = null
         val myId = currentUserId.value ?: return

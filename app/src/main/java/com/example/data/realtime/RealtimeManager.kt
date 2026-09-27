@@ -115,6 +115,10 @@ object RealtimeManager {
         _activeUserScreens.value = current
     }
 
+    fun clearAllActiveConversations() {
+        _activeUserScreens.value = emptyMap()
+    }
+
     fun isUserViewingConversation(userId: String, conversationId: String): Boolean {
         return _activeUserScreens.value[userId] == conversationId
     }
