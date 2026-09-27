@@ -1,22 +1,18 @@
 <div align="center">
-  <img src="./assets/bitchat-poster.png" width="900" alt="BitChat">
-</div>
 
 # BitChat
 
 ### Real-time messaging without a mobile number.
 
-<p>
-  A modern Android messaging application built with Jetpack Compose,
-  Firebase and a bold brutalist interface.
-</p>
+A modern Android messaging application built with Jetpack Compose,
+Firebase and a bold brutalist interface.
 
 <br>
 
-[![Android](https://img.shields.io/badge/Android-24%2B-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://developer.android.com/)
-[![Kotlin](https://img.shields.io/badge/Kotlin-2.x-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://kotlinlang.org/)
-[![Jetpack Compose](https://img.shields.io/badge/Jetpack%20Compose-UI-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white)](https://developer.android.com/compose)
-[![Firebase](https://img.shields.io/badge/Firebase-Backend-FFCA28?style=for-the-badge&logo=firebase&logoColor=black)](https://firebase.google.com/)
+<img src="https://img.shields.io/badge/ANDROID-24%2B-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android">
+<img src="https://img.shields.io/badge/KOTLIN-2.x-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white" alt="Kotlin">
+<img src="https://img.shields.io/badge/JETPACK%20COMPOSE-UI-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white" alt="Jetpack Compose">
+<img src="https://img.shields.io/badge/FIREBASE-BACKEND-FFCA28?style=for-the-badge&logo=firebase&logoColor=black" alt="Firebase">
 
 <br><br>
 
@@ -26,13 +22,19 @@
 &nbsp;•&nbsp;
 <a href="#installation">Installation</a>
 &nbsp;•&nbsp;
-<a href="#architecture">Architecture</a>
+<a href="#architecture--technology">Architecture</a>
+&nbsp;•&nbsp;
+<a href="#configuration">Configuration</a>
 &nbsp;•&nbsp;
 <a href="#contributing">Contributing</a>
 
 <br><br>
 
-<img src="assets/banner.png" width="850" alt="BitChat">
+<img
+  src="https://raw.githubusercontent.com/abhiminnal63-spec/BitChat/main/assets/bitchat-poster.png"
+  width="900"
+  alt="BitChat application showcase"
+>
 
 </div>
 
@@ -51,7 +53,7 @@ BitChat is a real-time Android messaging application designed around a simple
 idea: **chat without requiring a mobile number.**
 
 The application combines a bold brutalist visual language with modern Android
-technologies to provide a fast and straightforward messaging experience.
+technologies to provide a distinctive messaging experience.
 
 ---
 
@@ -69,18 +71,33 @@ technologies to provide a fast and straightforward messaging experience.
 - Conversation interface
 - Message delivery
 - Message notifications
-- Chat-based communication
+- Chat discovery
 - Modern messaging UI
+
+---
 
 ## 🎨 Experience
 
 - Brutalist visual design
 - Bold typography
 - Tactile controls
-- Responsive Jetpack Compose UI
+- Jetpack Compose UI
 - Smooth screen transitions
 - Modern Android interface
-- Dark-theme-friendly design
+- Light brutalism canvas
+- Custom visual themes
+
+---
+
+## 🎨 Customization
+
+- Fluorescent Green
+- Hot Pink
+- Red
+- Electric Blue
+- Yellow
+- Orange
+- Avatar identity seeds
 
 </td>
 
@@ -93,6 +110,8 @@ technologies to provide a fast and straightforward messaging experience.
 - Device notification integration
 - Notification-aware messaging flow
 
+---
+
 ## ☁️ Backend
 
 - Firebase Firestore
@@ -101,11 +120,13 @@ technologies to provide a fast and straightforward messaging experience.
 - Firestore security rules
 - Cloud-backed messaging infrastructure
 
+---
+
 ## 🤖 AI
 
 - Gemini API integration
 - Environment-based API configuration
-- AI Studio compatible configuration
+- Google AI Studio compatible configuration
 
 </td>
 
@@ -118,63 +139,26 @@ technologies to provide a fast and straightforward messaging experience.
 
 <div align="center">
 
-<table>
-<tr>
-
-<td align="center">
-<img src="screenshots/home.png" width="250">
-<br>
-<b>Home</b>
-</td>
-
-<td align="center">
-<img src="screenshots/chat.png" width="250">
-<br>
-<b>Chat</b>
-</td>
-
-<td align="center">
-<img src="screenshots/profile.png" width="250">
-<br>
-<b>Profile</b>
-</td>
-
-</tr>
-
-<tr>
-
-<td align="center">
-<img src="screenshots/notifications.png" width="250">
-<br>
-<b>Notifications</b>
-</td>
-
-<td align="center">
-<img src="screenshots/settings.png" width="250">
-<br>
-<b>Settings</b>
-</td>
-
-<td align="center">
-<img src="screenshots/about.png" width="250">
-<br>
-<b>About</b>
-</td>
-
-</tr>
-</table>
+<img
+  src="https://raw.githubusercontent.com/abhiminnal63-spec/BitChat/main/assets/bitchat-poster.png"
+  width="900"
+  alt="BitChat screenshots"
+>
 
 </div>
+
+The showcase presents the core BitChat experience, including the login,
+chat discovery and profile/theme customization interfaces.
 
 ---
 
 # 🧱 Design
 
-BitChat uses a **brutalist-inspired interface** built around strong visual
-hierarchy, bold typography and tactile controls.
+BitChat follows a **brutalist interface philosophy** built around strong
+borders, high-contrast colors, oversized typography and tactile controls.
 
-The interface intentionally avoids the typical generic messaging-app
-appearance and gives BitChat its own visual identity.
+The design intentionally avoids the conventional appearance of typical
+messaging applications.
 
 ---
 
@@ -198,11 +182,187 @@ appearance and gives BitChat its own visual identity.
 
 ---
 
+# 🚀 Installation
+
+## Clone the repository
+
+```bash
+git clone https://github.com/abhiminnal63-spec/BitChat.git
+cd BitChat
+```
+
+Open the project in Android Studio and allow Gradle synchronization to
+complete.
+
+---
+
+## 🔥 Firebase Configuration
+
+Configure your own Firebase project and Android application.
+
+Add your Firebase configuration according to your local development setup.
+
+Do not commit private Firebase credentials or service-account keys.
+
+---
+
 # 🔐 Configuration
 
 BitChat uses environment-based configuration for sensitive API values.
 
-Create your local environment configuration from:
+The repository provides:
 
 ```text
 .env.example
+```
+
+Create your local environment configuration and add your own credentials.
+
+Example:
+
+```env
+GEMINI_API_KEY=YOUR_GEMINI_API_KEY
+```
+
+Never commit real API keys to GitHub.
+
+---
+
+# 🛠️ Build
+
+Build a debug APK with:
+
+```bash
+./gradlew assembleDebug
+```
+
+The generated APK will be available under:
+
+```text
+app/build/outputs/apk/debug/
+```
+
+---
+
+# 📦 Download
+
+Stable public releases will be published through GitHub Releases.
+
+<a href="https://github.com/abhiminnal63-spec/BitChat/releases">
+
+<strong>Download BitChat →</strong>
+
+</a>
+
+---
+
+# 🗂️ Project Structure
+
+```text
+BitChat/
+│
+├── app/
+│   └── src/
+│       └── main/
+│
+├── assets/
+│   ├── bitchat-poster.png
+│   └── ...
+│
+├── gradle/
+│
+├── .env.example
+├── .gitignore
+├── firestore.rules
+├── metadata.json
+├── build.gradle.kts
+├── settings.gradle.kts
+└── README.md
+```
+
+---
+
+# 🛡️ Security
+
+Do not commit:
+
+```text
+.env
+google-services.json
+*.jks
+*.keystore
+API keys
+private credentials
+Firebase service-account credentials
+```
+
+Keep sensitive configuration local to your development environment.
+
+---
+
+# 🤝 Contributing
+
+Contributions are welcome.
+
+### Create a branch
+
+```bash
+git checkout -b feature/your-feature
+```
+
+Make your changes, test the application and commit your work.
+
+```bash
+git add .
+git commit -m "Add your feature"
+git push origin feature/your-feature
+```
+
+Then open a Pull Request.
+
+---
+
+# 🗺️ Roadmap
+
+- [x] Android application
+- [x] Jetpack Compose UI
+- [x] Firebase integration
+- [x] Firestore integration
+- [x] Firebase Cloud Messaging
+- [x] Brutalist interface
+- [x] Custom themes
+- [x] Avatar identity selection
+- [ ] Stable public release
+- [ ] GitHub Releases APK
+- [ ] More messaging controls
+- [ ] Improved onboarding
+- [ ] Performance improvements
+- [ ] Additional customization
+
+---
+
+# 📄 License
+
+See the repository license for licensing information.
+
+---
+
+<div align="center">
+
+# 💬 BitChat
+
+### CHAT. CONNECT. DISCOVER.
+
+**Real-time messaging without a mobile number.**
+
+<br>
+
+⭐ Star the repository if you like the project.
+
+<br>
+
+<a href="https://github.com/abhiminnal63-spec/BitChat">
+GitHub Repository
+</a>
+
+</div>
