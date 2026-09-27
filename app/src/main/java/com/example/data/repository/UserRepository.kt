@@ -9,6 +9,8 @@ import com.example.data.model.cleanDisplayUsername
 import com.example.data.model.normalizeUsername
 import com.example.data.realtime.RealtimeManager
 import com.example.data.relay.GlobalRelayEngine
+import com.example.notifications.BitchatNotificationManager
+import com.example.notifications.DeviceTokenManager
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
@@ -35,8 +37,23 @@ class UserRepository(
     val firestoreSyncManager: FirestoreSyncManager? = null,
     val relayEngine: GlobalRelayEngine? = null
 ) {
+    private val appContext: Context = context.applicationContext
     private val prefs: SharedPreferences =
         context.getSharedPreferences("easapp_session_prefs", Context.MODE_PRIVATE)
+
+    private suspend fun registerCurrentDeviceToken(userId: String) {
+        if (userId.isBlank()) return
+        try {
+            DeviceTokenManager.registerDeviceForUser(
+                context = appContext,
+                userId = userId,
+                userDao = userDao,
+                firestoreSyncManager = firestoreSyncManager,
+                relayEngine = relayEngine
+            )
+        } catch (_: Exception) {
+        }
+    }
 
     private val _currentUserId = MutableStateFlow<String?>(prefs.getString("logged_in_user_id", null))
     val currentUserId: StateFlow<String?> = _currentUserId.asStateFlow()
@@ -54,6 +71,24 @@ class UserRepository(
 
     init {
         RealtimeManager.initNetworkMonitoring(context.applicationContext)
+        BitchatNotificationManager.ensureNotificationChannel(appContext)
+        BitchatNotificationManager.setAppInForeground(true)
+
+        // Automatically synchronize missed offline messages whenever network connectivity is restored
+        scope.launch {
+            var wasConnected = RealtimeManager.isNetworkConnected.value
+            RealtimeManager.isNetworkConnected.collect { connected ->
+                if (connected && !wasConnected) {
+                    val uid = _currentUserId.value
+                    if (!uid.isNullOrBlank()) {
+                        registerCurrentDeviceToken(uid)
+                        firestoreSyncManager?.synchronizeOfflineMessagesForUser(uid)
+                        relayEngine?.synchronizeOfflineMessagesForUser(uid)
+                    }
+                }
+                wasConnected = connected
+            }
+        }
 
         val storedId = _currentUserId.value
         val storedProfileJson = prefs.getString("logged_in_user_profile_json", null)
@@ -109,6 +144,8 @@ class UserRepository(
                     relayEngine?.start(storedId)
                     relayEngine?.broadcastPresence(storedId, true, now, cacheInHistory = true)
                     relayEngine?.broadcastUser(activeUser, isNew = false, authVerifier = storedVerifier)
+                    registerCurrentDeviceToken(storedId)
+                    firestoreSyncManager?.synchronizeOfflineMessagesForUser(storedId)
                     startPresenceHeartbeat()
                 } else {
                     _currentUserId.value = null
@@ -123,6 +160,7 @@ class UserRepository(
 
     fun onAppForegrounded() {
         isAppInForeground.value = true
+        BitchatNotificationManager.setAppInForeground(true)
         val uid = _currentUserId.value ?: return
         scope.launch {
             val now = System.currentTimeMillis()
@@ -131,12 +169,16 @@ class UserRepository(
             firestoreSyncManager?.updatePresenceInCloud(uid, true, now)
             relayEngine?.start(uid)
             relayEngine?.broadcastPresence(uid, true, now, cacheInHistory = true)
+            registerCurrentDeviceToken(uid)
+            firestoreSyncManager?.synchronizeOfflineMessagesForUser(uid)
+            relayEngine?.synchronizeOfflineMessagesForUser(uid)
         }
         startPresenceHeartbeat()
     }
 
     fun onAppBackgrounded() {
         isAppInForeground.value = false
+        BitchatNotificationManager.setAppInForeground(false)
         heartbeatJob?.cancel()
         heartbeatJob = null
         val uid = _currentUserId.value ?: return
@@ -147,6 +189,13 @@ class UserRepository(
             firestoreSyncManager?.updatePresenceInCloud(uid, false, now)
             relayEngine?.broadcastPresence(uid, false, now, cacheInHistory = true)
         }
+    }
+
+    suspend fun synchronizeOfflineMessages(): Int = withContext(Dispatchers.IO) {
+        val uid = _currentUserId.value ?: return@withContext 0
+        val fsCount = firestoreSyncManager?.synchronizeOfflineMessagesForUser(uid) ?: 0
+        val relayCount = relayEngine?.synchronizeOfflineMessagesForUser(uid) ?: 0
+        fsCount + relayCount
     }
 
     private fun startPresenceHeartbeat() {
@@ -234,7 +283,7 @@ class UserRepository(
                 displayName = obj.optString("displayName", username).ifBlank { username },
                 passwordHash = "",
                 avatarSeed = obj.optString("avatarSeed", "BRUTAL_1"),
-                statusMessage = obj.optString("statusMessage", "Available on Easapp"),
+                statusMessage = obj.optString("statusMessage", "Available on BITCHAT"),
                 isOnline = true,
                 lastSeenTimestamp = System.currentTimeMillis(),
                 createdAt = obj.optLong("createdAt", System.currentTimeMillis())
@@ -311,7 +360,7 @@ class UserRepository(
             displayName = cleanDisplayName,
             passwordHash = passwordHash,
             avatarSeed = avatarSeed,
-            statusMessage = "Available on Easapp",
+            statusMessage = "Available on BITCHAT",
             isOnline = true,
             lastSeenTimestamp = now,
             createdAt = now
@@ -325,6 +374,9 @@ class UserRepository(
         relayEngine?.publishUserSync(newUser, isNew = true, authVerifier = authVerifier)
         firestoreSyncManager?.startSync(newUser.id)
         relayEngine?.start(newUser.id)
+        scope.launch {
+            registerCurrentDeviceToken(newUser.id)
+        }
 
         Result.success(newUser)
     }
@@ -399,6 +451,10 @@ class UserRepository(
         relayEngine?.broadcastUser(updatedUser, isNew = false, authVerifier = expectedVerifier)
 
         setSession(updatedUser, expectedVerifier)
+        scope.launch {
+            registerCurrentDeviceToken(updatedUser.id)
+            firestoreSyncManager?.synchronizeOfflineMessagesForUser(updatedUser.id)
+        }
         Result.success(updatedUser)
     }
 
@@ -443,6 +499,10 @@ class UserRepository(
         relayEngine?.broadcastUser(updated, isNew = false, authVerifier = savedVerifier)
 
         setSession(updated, savedVerifier)
+        scope.launch {
+            registerCurrentDeviceToken(userId)
+            firestoreSyncManager?.synchronizeOfflineMessagesForUser(userId)
+        }
         Result.success(updated)
     }
 

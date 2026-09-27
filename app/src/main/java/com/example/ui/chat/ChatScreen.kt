@@ -92,6 +92,7 @@ import com.example.ui.theme.EasappOnlineGreen
 import com.example.ui.theme.EasappReadBlue
 import com.example.ui.theme.EasappSecondary
 import com.example.ui.theme.SharpCorner
+import com.example.ui.theme.ShootingStarFontFamily
 import com.example.util.DateTimeUtils
 import com.example.util.ImageUtils
 import kotlinx.coroutines.Dispatchers
@@ -358,7 +359,19 @@ fun ChatScreen(
                                 )
                             }
                         }
+                        Spacer(modifier = Modifier.width(6.dp))
                     }
+
+                    Text(
+                        text = "BITCHAT",
+                        fontWeight = FontWeight.Normal,
+                        fontSize = 14.sp,
+                        fontFamily = ShootingStarFontFamily,
+                        color = colors.textPrimary,
+                        modifier = Modifier
+                            .padding(end = 4.dp)
+                            .testTag("chat_header_bitchat_branding")
+                    )
                 }
             }
 

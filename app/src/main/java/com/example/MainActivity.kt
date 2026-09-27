@@ -1,9 +1,15 @@
 package com.example
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -20,10 +26,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import com.example.data.database.EasappDatabase
 import com.example.data.firestore.FirestoreSyncManager
+import com.example.data.model.buildDeterministicConversationId
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.UserRepository
+import com.example.notifications.BitchatNotificationManager
+import com.example.notifications.DeviceTokenManager
 import com.example.ui.auth.AuthScreen
 import com.example.ui.auth.AuthViewModel
 import com.example.ui.chat.ChatScreen
@@ -38,10 +49,20 @@ import com.example.ui.theme.BrutalistBackground
 import com.example.ui.theme.BrutalistBlack
 import com.example.ui.theme.EasappTheme
 import com.example.util.ThemeManager
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+data class NotificationDeepLinkTarget(
+    val conversationId: String,
+    val otherUserId: String
+)
 
 class MainActivity : ComponentActivity() {
 
     private var userRepositoryRef: UserRepository? = null
+    private val _pendingDeepLink = MutableStateFlow<NotificationDeepLinkTarget?>(null)
+    val pendingDeepLink: StateFlow<NotificationDeepLinkTarget?> = _pendingDeepLink.asStateFlow()
 
     override fun onStart() {
         super.onStart()
@@ -53,15 +74,42 @@ class MainActivity : ComponentActivity() {
         userRepositoryRef?.onAppBackgrounded()
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        extractNotificationDeepLink(intent)
+    }
+
+    private fun extractNotificationDeepLink(intent: Intent?) {
+        if (intent == null) return
+        val convId = intent.getStringExtra(BitchatNotificationManager.EXTRA_CONVERSATION_ID)?.trim().orEmpty()
+        val otherId = intent.getStringExtra(BitchatNotificationManager.EXTRA_OTHER_USER_ID)?.trim().orEmpty()
+        if (convId.isNotBlank() || otherId.isNotBlank()) {
+            _pendingDeepLink.value = NotificationDeepLinkTarget(
+                conversationId = convId,
+                otherUserId = otherId
+            )
+            intent.removeExtra(BitchatNotificationManager.EXTRA_CONVERSATION_ID)
+            intent.removeExtra(BitchatNotificationManager.EXTRA_OTHER_USER_ID)
+        }
+    }
+
+    fun consumePendingDeepLink() {
+        _pendingDeepLink.value = null
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        BitchatNotificationManager.ensureNotificationChannel(applicationContext)
+        extractNotificationDeepLink(intent)
 
         val database = EasappDatabase.getInstance(applicationContext)
         val globalRelayEngine = com.example.data.relay.GlobalRelayEngine(
             userDao = database.userDao(),
             conversationDao = database.conversationDao(),
-            messageDao = database.messageDao()
+            messageDao = database.messageDao(),
+            appContext = applicationContext
         )
         val firestoreSyncManager = FirestoreSyncManager(
             context = applicationContext,
@@ -90,6 +138,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val isDarkMode by themeManager.isDarkMode.collectAsState()
             val selectedTheme by themeManager.selectedTheme.collectAsState()
+            val deepLinkTarget by pendingDeepLink.collectAsState()
 
             EasappTheme(
                 darkTheme = isDarkMode,
@@ -103,7 +152,9 @@ class MainActivity : ComponentActivity() {
                         database = database,
                         userRepository = userRepository,
                         chatRepository = chatRepository,
-                        themeManager = themeManager
+                        themeManager = themeManager,
+                        pendingDeepLink = deepLinkTarget,
+                        onDeepLinkConsumed = { consumePendingDeepLink() }
                     )
                 }
             }
@@ -116,17 +167,71 @@ fun EasappApp(
     database: EasappDatabase,
     userRepository: UserRepository,
     chatRepository: ChatRepository,
-    themeManager: ThemeManager
+    themeManager: ThemeManager,
+    pendingDeepLink: NotificationDeepLinkTarget? = null,
+    onDeepLinkConsumed: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     val currentUserId by userRepository.currentUserId.collectAsState()
     var currentScreen by remember { mutableStateOf<Screen>(Screen.Auth) }
 
-    // Synchronize authentication state with current screen
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { /* Permission granted or denied */ }
+    )
+
     LaunchedEffect(currentUserId) {
-        if (currentUserId == null) {
+        if (currentUserId != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val hasPerm = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!hasPerm) {
+                try {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    // Synchronize authentication state and notification deep-link routing with current screen
+    LaunchedEffect(currentUserId, pendingDeepLink) {
+        val uid = currentUserId
+        if (uid == null) {
             currentScreen = Screen.Auth
-        } else if (currentScreen is Screen.Auth) {
-            currentScreen = Screen.Home
+        } else {
+            val target = pendingDeepLink
+            if (target != null) {
+                val resolvedOtherId = target.otherUserId.ifBlank {
+                    target.conversationId
+                        .removePrefix("${uid}_")
+                        .removeSuffix("_$uid")
+                        .takeIf { it != target.conversationId }
+                        .orEmpty()
+                }
+                val resolvedConvId = target.conversationId.ifBlank {
+                    if (resolvedOtherId.isNotBlank()) {
+                        buildDeterministicConversationId(uid, resolvedOtherId)
+                    } else {
+                        ""
+                    }
+                }
+                if (resolvedConvId.isNotBlank() && resolvedOtherId.isNotBlank()) {
+                    BitchatNotificationManager.cancelNotificationForConversation(context, resolvedConvId)
+                    chatRepository.getOrCreateConversation(uid, resolvedOtherId)
+                    chatRepository.synchronizeOfflineMessages(uid)
+                    currentScreen = Screen.Chat(
+                        conversationId = resolvedConvId,
+                        otherUserId = resolvedOtherId
+                    )
+                    onDeepLinkConsumed()
+                    return@LaunchedEffect
+                }
+            }
+            if (currentScreen is Screen.Auth) {
+                currentScreen = Screen.Home
+            }
         }
     }
 

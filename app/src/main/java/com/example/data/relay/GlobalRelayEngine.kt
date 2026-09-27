@@ -1,5 +1,6 @@
 package com.example.data.relay
 
+import android.content.Context
 import android.util.Log
 import com.example.data.dao.ConversationDao
 import com.example.data.dao.MessageDao
@@ -8,11 +9,13 @@ import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
 import com.example.data.model.MessageStatus
 import com.example.data.model.UserConversationStateEntity
+import com.example.data.model.UserDeviceEntity
 import com.example.data.model.UserEntity
 import com.example.data.model.buildDeterministicConversationId
 import com.example.data.model.cleanDisplayUsername
 import com.example.data.model.normalizeUsername
 import com.example.data.realtime.RealtimeManager
+import com.example.notifications.BitchatNotificationManager
 import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStreamReader
@@ -42,11 +45,12 @@ import org.json.JSONObject
 class GlobalRelayEngine(
     private val userDao: UserDao,
     private val conversationDao: ConversationDao,
-    private val messageDao: MessageDao
+    private val messageDao: MessageDao,
+    private val appContext: Context? = null,
+    private val baseTopic: String = "easapp_cloud_v3"
 ) {
     private val tag = "GlobalRelay"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val baseTopic = "easapp_cloud_v3"
 
     private val streamClient = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS) // infinite for SSE stream
@@ -255,6 +259,9 @@ class GlobalRelayEngine(
                 "USER_REGISTERED", "USER_UPDATED", "PRESENCE_UPDATE" -> {
                     handleIncomingUserPayload(json)
                 }
+                "USER_DEVICE_REGISTERED", "USER_DEVICE_REMOVED" -> {
+                    handleIncomingDevicePayload(json)
+                }
                 "NEW_MESSAGE", "MESSAGE_STATUS", "READ_RECEIPT", "TYPING_INDICATOR", "CONVERSATION_SYNC", "USER_CONVERSATION_STATE" -> {
                     handleIncomingMessagingPayload(json)
                 }
@@ -295,11 +302,42 @@ class GlobalRelayEngine(
             displayName = userObj.optString("displayName", cleanUser).ifBlank { cleanUser },
             passwordHash = "", // Security: never expose passwordHash to UserEntity from cloud
             avatarSeed = userObj.optString("photoURL", userObj.optString("avatarSeed", "BRUTAL_1")),
-            statusMessage = userObj.optString("statusMessage", "Available on Easapp"),
+            statusMessage = userObj.optString("statusMessage", "Available on BITCHAT")
+                .replace("Easapp", "BITCHAT", ignoreCase = true),
             isOnline = isFreshOnline,
             lastSeenTimestamp = lastSeen,
             createdAt = createdAt
         )
+    }
+
+    private suspend fun handleIncomingDevicePayload(json: JSONObject) {
+        try {
+            val action = json.optString("action")
+            val devObj = json.optJSONObject("device") ?: json
+            val userId = devObj.optString("userId", "").trim()
+            val deviceId = devObj.optString("deviceId", "").trim()
+            if (userId.isBlank() || deviceId.isBlank()) return
+            if (action == "USER_DEVICE_REMOVED") {
+                userDao.deleteUserDevice(userId, deviceId)
+            } else {
+                val token = devObj.optString("fcmToken", "").trim()
+                if (token.isNotBlank()) {
+                    val platform = devObj.optString("platform", "android")
+                    val updatedAt = devObj.optLong("updatedAt", System.currentTimeMillis())
+                    userDao.upsertUserDevice(
+                        UserDeviceEntity(
+                            userId = userId,
+                            deviceId = deviceId,
+                            fcmToken = token,
+                            platform = platform,
+                            updatedAt = updatedAt
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Device payload error: ${e.message}")
+        }
     }
 
     private fun mergeUserPreservingNewestPresence(existing: UserEntity?, incoming: UserEntity): UserEntity {
@@ -523,7 +561,9 @@ class GlobalRelayEngine(
 
                     val existingLocalMsg = messageDao.getMessageByIdDirect(messageId)
                     val isRecipientMe = recipientId == myUid
-                    val isViewing = isRecipientMe && RealtimeManager.isUserViewingConversation(myUid, canonicalConvId)
+                    val isViewing = isRecipientMe &&
+                        RealtimeManager.isAppInForeground.value &&
+                        RealtimeManager.isUserViewingConversation(myUid, canonicalConvId)
 
                     val effectiveStatus = when {
                         isRecipientMe && isViewing -> MessageStatus.READ.name
@@ -648,6 +688,20 @@ class GlobalRelayEngine(
                                 status = finalStatus
                             )
                         }
+                    }
+
+                    // Show Android push notification when recipient is NOT actively viewing the conversation in foreground (CASE 2 / 3 / 4)
+                    if (isRecipientMe && !isViewing && appContext != null && finalStatus != MessageStatus.READ.name) {
+                        val senderUser = userDao.getUserByIdDirect(senderId) ?: cloudUsersCache[senderId]
+                        val senderName = senderUser?.displayName?.takeIf { it.isNotBlank() }
+                            ?: senderUser?.username?.takeIf { it.isNotBlank() }
+                            ?: "Contact"
+                        BitchatNotificationManager.showIncomingMessageNotification(
+                            context = appContext,
+                            recipientId = myUid,
+                            message = message,
+                            senderDisplayName = senderName
+                        )
                     }
                 }
 
@@ -1462,6 +1516,37 @@ class GlobalRelayEngine(
         } else {
             postPayload("$baseTopic-conv-$conversationId", payload, cacheHeader = false)
         }
+    }
+
+    suspend fun synchronizeOfflineMessagesForUser(userId: String): Int = withContext(Dispatchers.IO) {
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return@withContext 0
+        try {
+            syncUserInboxFromCloud(cleanUid, forceFullHistory = true)
+            activeConversationId?.let { convId ->
+                if (convId.isNotBlank()) {
+                    syncConversationHistoryFromCloud(convId, forceFullHistory = true)
+                }
+            }
+        } catch (_: Exception) {
+        }
+        1
+    }
+
+    fun publishUserDevice(device: UserDeviceEntity) {
+        if (device.userId.isBlank() || device.deviceId.isBlank() || device.fcmToken.isBlank()) return
+        val devObj = JSONObject().apply {
+            put("userId", device.userId)
+            put("deviceId", device.deviceId)
+            put("fcmToken", device.fcmToken)
+            put("platform", device.platform)
+            put("updatedAt", device.updatedAt)
+        }
+        val payload = JSONObject().apply {
+            put("action", "USER_DEVICE_REGISTERED")
+            put("device", devObj)
+        }
+        postPayload("$baseTopic-user-${device.userId}", payload, cacheHeader = true)
     }
 
     fun stop() {

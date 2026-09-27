@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/easapp_icon_1790314720153"
+        android:drawable="@drawable/bitchat_icon_1790449346709"
         android:gravity="center" />
 </layer-list>

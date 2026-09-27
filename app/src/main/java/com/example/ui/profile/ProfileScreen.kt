@@ -64,6 +64,7 @@ import com.example.ui.theme.EasappColorTheme
 import com.example.ui.theme.EasappOnlineGreen
 import com.example.ui.theme.EasappSecondary
 import com.example.ui.theme.SharpCorner
+import com.example.ui.theme.ShootingStarFontFamily
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -128,7 +129,18 @@ fun ProfileScreen(
                         fontWeight = FontWeight.Black,
                         fontSize = 15.sp,
                         fontFamily = FontFamily.Monospace,
-                        color = colors.textPrimary
+                        color = colors.textPrimary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = "BITCHAT",
+                        fontWeight = FontWeight.Normal,
+                        fontSize = 16.sp,
+                        fontFamily = ShootingStarFontFamily,
+                        color = colors.textPrimary,
+                        modifier = Modifier
+                            .padding(end = 8.dp)
+                            .testTag("profile_bitchat_branding")
                     )
                 }
             }
@@ -598,6 +610,48 @@ fun ProfileScreen(
                             )
                             Text(
                                 text = "• USER ID: ${currentUser?.id}",
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = colors.textSecondary
+                            )
+                            Text(
+                                text = "• PUSH CHANNEL: BITCHAT Messages (FCM + Offline Sync)",
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = colors.textSecondary
+                            )
+                        }
+                    }
+                }
+
+                // About BITCHAT Card
+                item {
+                    BrutalistCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        backgroundColor = colors.cardBackground,
+                        shadowOffset = 3.dp
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "ABOUT // APPLICATION",
+                                fontWeight = FontWeight.Black,
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = colors.textPrimary
+                            )
+                            Text(
+                                text = "BITCHAT",
+                                fontWeight = FontWeight.Normal,
+                                fontSize = 24.sp,
+                                fontFamily = ShootingStarFontFamily,
+                                color = colors.textPrimary,
+                                modifier = Modifier.testTag("about_bitchat_wordmark")
+                            )
+                            Text(
+                                text = "End-to-end cloud-synchronized brutalist messenger with permanent offline message delivery and Android FCM push notifications.",
                                 fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace,
                                 color = colors.textSecondary

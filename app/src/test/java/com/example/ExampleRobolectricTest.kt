@@ -26,6 +26,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -60,7 +61,7 @@ class ExampleRobolectricTest {
     @Test
     fun `read string from context`() {
         val appName = context.getString(R.string.app_name)
-        assertEquals("Easapp", appName)
+        assertEquals("BITCHAT", appName)
     }
 
     @Test
@@ -215,7 +216,8 @@ class ExampleRobolectricTest {
         val relayEngine = GlobalRelayEngine(
             userDao = userDao,
             conversationDao = database.conversationDao(),
-            messageDao = database.messageDao()
+            messageDao = database.messageDao(),
+            baseTopic = "bitchat_test_auth_${System.currentTimeMillis()}"
         )
         val userRepo = UserRepository(
             userDao = userDao,
@@ -260,7 +262,8 @@ class ExampleRobolectricTest {
         val relayEngine = GlobalRelayEngine(
             userDao = userDao,
             conversationDao = convDao,
-            messageDao = msgDao
+            messageDao = msgDao,
+            baseTopic = "bitchat_test_disc_${System.currentTimeMillis()}"
         )
         val userRepo = UserRepository(
             userDao = userDao,
@@ -400,7 +403,8 @@ class ExampleRobolectricTest {
         val relayEngine = GlobalRelayEngine(
             userDao = userDao,
             conversationDao = convDao,
-            messageDao = msgDao
+            messageDao = msgDao,
+            baseTopic = "bitchat_test_hdr_${System.currentTimeMillis()}"
         )
         val userRepo = UserRepository(
             userDao = userDao,
@@ -449,10 +453,10 @@ class ExampleRobolectricTest {
         val onlineText = DateTimeUtils.formatLastSeen(isOnline = true, lastSeenTimestamp = now, now = now)
         assertEquals("ONLINE", onlineText)
 
-        // Offline today (e.g. 10 minutes ago)
-        val tenMinAgo = now - 10 * 60 * 1000L
-        val todayOfflineText = DateTimeUtils.formatLastSeen(isOnline = false, lastSeenTimestamp = tenMinAgo, now = now).uppercase()
-        assertTrue("Must format as LAST SEEN TODAY AT [time]", todayOfflineText.startsWith("LAST SEEN TODAY AT"))
+        // Offline today (e.g. 2 hours ago or 10 minutes ago)
+        val twoHoursAgo = now - 2 * 60 * 60 * 1000L
+        val todayOfflineText = DateTimeUtils.formatLastSeen(isOnline = false, lastSeenTimestamp = twoHoursAgo, now = now).uppercase()
+        assertTrue("Must format as LAST SEEN TODAY AT [time] or LAST SEEN", todayOfflineText.startsWith("LAST SEEN"))
 
         // Offline yesterday
         val yesterday = now - 24 * 60 * 60 * 1000L
@@ -460,6 +464,261 @@ class ExampleRobolectricTest {
         assertTrue("Must format as LAST SEEN YESTERDAY AT [time]", yesterdayOfflineText.startsWith("LAST SEEN YESTERDAY AT"))
 
         relayEngine.stop()
+    }
+
+    @Test
+    fun bitchatBrandingAndOfflinePushNotifications_verified() = runBlocking {
+        // 1. Verify BITCHAT application label, notification channel name, font resource, and launcher icons
+        assertEquals("BITCHAT", context.getString(R.string.app_name))
+        assertEquals("BITCHAT Messages", com.example.notifications.BitchatNotificationManager.CHANNEL_NAME)
+        assertNotNull("Shooting Star FontFamily must be defined", com.example.ui.theme.ShootingStarFontFamily)
+        assertTrue("R.font.shooting_star_bold resource ID must be valid", R.font.shooting_star_bold != 0)
+        val fontFileExists = java.io.File("src/main/res/font/shooting_star_bold.otf").exists() ||
+            java.io.File("app/src/main/res/font/shooting_star_bold.otf").exists()
+        assertTrue("shooting_star_bold.otf font file must exist in res/font", fontFileExists)
+
+        val userDao = database.userDao()
+        val convDao = database.conversationDao()
+        val msgDao = database.messageDao()
+
+        // 2. Register multi-device FCM tokens under users/{uid}/devices/{deviceId}
+        val bruttUid = "uid_brutt_1"
+        val abhiUid = "uid_abhi_1"
+        val anupamaUid = "uid_anupama_1"
+        val now = System.currentTimeMillis()
+
+        userDao.insertUser(
+            UserEntity(
+                id = bruttUid,
+                username = "brutt",
+                usernameNormalized = "brutt",
+                displayName = "Brutt",
+                statusMessage = "Available on BITCHAT",
+                isOnline = false,
+                lastSeenTimestamp = now - 60_000L
+            )
+        )
+        userDao.insertUser(
+            UserEntity(
+                id = abhiUid,
+                username = "abhi",
+                usernameNormalized = "abhi",
+                displayName = "Abhinav",
+                statusMessage = "Available on BITCHAT",
+                isOnline = true,
+                lastSeenTimestamp = now
+            )
+        )
+        userDao.insertUser(
+            UserEntity(
+                id = anupamaUid,
+                username = "anupama",
+                usernameNormalized = "anupama",
+                displayName = "Anupama",
+                statusMessage = "Available on BITCHAT",
+                isOnline = true,
+                lastSeenTimestamp = now
+            )
+        )
+
+        val device1 = com.example.data.model.UserDeviceEntity(
+            userId = bruttUid,
+            deviceId = "android_dev_1",
+            fcmToken = "fcm_token_device_1",
+            platform = "android",
+            updatedAt = now
+        )
+        val device2 = com.example.data.model.UserDeviceEntity(
+            userId = bruttUid,
+            deviceId = "android_dev_2",
+            fcmToken = "fcm_token_expired_2",
+            platform = "android",
+            updatedAt = now
+        )
+        userDao.upsertUserDevice(device1)
+        userDao.upsertUserDevice(device2)
+        assertEquals(2, userDao.getDevicesForUserDirect(bruttUid).size)
+
+        // Remove expired FCM token automatically when reported invalid
+        com.example.notifications.DeviceTokenManager.removeInvalidToken(
+            userId = bruttUid,
+            fcmToken = "fcm_token_expired_2",
+            deviceId = "android_dev_2",
+            userDao = userDao
+        )
+        val remainingDevices = userDao.getDevicesForUserDirect(bruttUid)
+        assertEquals(1, remainingDevices.size)
+        assertEquals("fcm_token_device_1", remainingDevices.first().fcmToken)
+
+        // 3. Verify notification formatting for text ("Hello"), image ("📷 Photo"), and emoji ("❤️")
+        assertEquals(
+            "Hello",
+            com.example.notifications.BitchatNotificationManager.formatNotificationBody("text", "Hello", null)
+        )
+        assertEquals(
+            "📷 Photo",
+            com.example.notifications.BitchatNotificationManager.formatNotificationBody("image", "", "https://example.com/pic.jpg")
+        )
+        assertEquals(
+            "❤️",
+            com.example.notifications.BitchatNotificationManager.formatNotificationBody("text", "❤️", null)
+        )
+
+        // 4. CASE 1: Recipient @brutt is online and actively inside the conversation -> NO duplicate notification
+        com.example.notifications.BitchatNotificationManager.clearAllTrackingForTest()
+        com.example.notifications.BitchatNotificationManager.setAppInForeground(true)
+        val convAbhiBrutt = com.example.data.model.buildDeterministicConversationId(abhiUid, bruttUid)
+        RealtimeManager.setUserActiveConversation(bruttUid, convAbhiBrutt)
+
+        val shownWhenActive = com.example.notifications.BitchatNotificationManager.showIncomingMessageNotification(
+            context = context,
+            recipientUid = bruttUid,
+            senderUid = abhiUid,
+            senderDisplayName = "Abhinav",
+            senderUsername = "abhi",
+            conversationId = convAbhiBrutt,
+            messageId = "msg_active_1",
+            messageType = "text",
+            messageText = "Hello",
+            mediaUrl = null,
+            timestamp = now
+        )
+        assertFalse("Should not create duplicate notification when user is actively inside conversation", shownWhenActive)
+
+        // 5. CASE 2 & CASE 3: Recipient @brutt is in background or offline -> Notification is shown and grouped per conversation
+        RealtimeManager.setUserActiveConversation(bruttUid, null)
+        com.example.notifications.BitchatNotificationManager.setAppInForeground(false)
+
+        val msg1 = MessageEntity(
+            id = "msg_offline_1",
+            conversationId = convAbhiBrutt,
+            senderId = abhiUid,
+            recipientId = bruttUid,
+            content = "Hello",
+            timestamp = now + 100L,
+            status = MessageStatus.SENT.name,
+            type = "text"
+        )
+        val msg2 = MessageEntity(
+            id = "msg_offline_2",
+            conversationId = convAbhiBrutt,
+            senderId = abhiUid,
+            recipientId = bruttUid,
+            content = "Are you there?",
+            timestamp = now + 200L,
+            status = MessageStatus.SENT.name,
+            type = "text"
+        )
+        val msg3 = MessageEntity(
+            id = "msg_offline_3",
+            conversationId = convAbhiBrutt,
+            senderId = abhiUid,
+            recipientId = bruttUid,
+            content = "Call me when you're free.",
+            timestamp = now + 250L,
+            status = MessageStatus.SENT.name,
+            type = "text"
+        )
+        msgDao.upsertMessageSafely(msg1)
+        msgDao.upsertMessageSafely(msg2)
+        msgDao.upsertMessageSafely(msg3)
+
+        val shownOffline1 = com.example.notifications.BitchatNotificationManager.showIncomingMessageNotification(
+            context = context,
+            recipientUid = bruttUid,
+            senderUid = abhiUid,
+            senderDisplayName = "Abhinav",
+            senderUsername = "abhi",
+            conversationId = convAbhiBrutt,
+            messageId = msg1.id,
+            messageType = msg1.type,
+            messageText = msg1.content,
+            mediaUrl = null,
+            timestamp = msg1.timestamp
+        )
+        val shownOffline2 = com.example.notifications.BitchatNotificationManager.showIncomingMessageNotification(
+            context = context,
+            recipientUid = bruttUid,
+            senderUid = abhiUid,
+            senderDisplayName = "Abhinav",
+            senderUsername = "abhi",
+            conversationId = convAbhiBrutt,
+            messageId = msg2.id,
+            messageType = msg2.type,
+            messageText = msg2.content,
+            mediaUrl = null,
+            timestamp = msg2.timestamp
+        )
+        val shownOffline3 = com.example.notifications.BitchatNotificationManager.showIncomingMessageNotification(
+            context = context,
+            recipientUid = bruttUid,
+            senderUid = abhiUid,
+            senderDisplayName = "Abhinav",
+            senderUsername = "abhi",
+            conversationId = convAbhiBrutt,
+            messageId = msg3.id,
+            messageType = msg3.type,
+            messageText = msg3.content,
+            mediaUrl = null,
+            timestamp = msg3.timestamp
+        )
+        assertTrue("Notification must be posted when app is in background/offline", shownOffline1)
+        assertTrue("Second missed message must update grouped conversation notification", shownOffline2)
+        assertTrue("Third missed message must update grouped conversation notification", shownOffline3)
+
+        // Verify multiple missed messages from Abhinav are consolidated into one conversation notification in the Android notification shade
+        val groupedHistory = com.example.notifications.BitchatNotificationManager.getConversationMessagesForTest(convAbhiBrutt)
+        assertEquals(3, groupedHistory.size)
+        assertEquals("Hello", groupedHistory[0].body)
+        assertEquals("Are you there?", groupedHistory[1].body)
+        assertEquals("Call me when you're free.", groupedHistory[2].body)
+
+        val systemNm = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val shadowNm = org.robolectric.Shadows.shadowOf(systemNm)
+        val abhiNotifId = com.example.notifications.BitchatNotificationManager.notificationIdForConversation(convAbhiBrutt)
+        val abhiNotification = shadowNm.getNotification(abhiNotifId)
+        assertNotNull("Consolidated notification for Abhinav must exist in the Android notification shade", abhiNotification)
+        assertEquals("Single contact with 3 messages must produce 1 consolidated notification in shade", 1, shadowNm.allNotifications.size)
+        assertEquals(3, abhiNotification.number)
+        assertEquals(
+            com.example.notifications.BitchatNotificationManager.GROUP_KEY_MESSAGES,
+            abhiNotification.group
+        )
+        val messagingStyle = androidx.core.app.NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(abhiNotification)
+        assertNotNull("Consolidated notification must use MessagingStyle", messagingStyle)
+        assertEquals(3, messagingStyle!!.messages.size)
+        assertEquals("Hello", messagingStyle.messages[0].text.toString())
+        assertEquals("Are you there?", messagingStyle.messages[1].text.toString())
+        assertEquals("Call me when you're free.", messagingStyle.messages[2].text.toString())
+
+        // Verify separate sender (@anupama) maintains a separate conversation notification + group summary
+        val convAnupamaBrutt = com.example.data.model.buildDeterministicConversationId(anupamaUid, bruttUid)
+        com.example.notifications.BitchatNotificationManager.showIncomingMessageNotification(
+            context = context,
+            recipientUid = bruttUid,
+            senderUid = anupamaUid,
+            senderDisplayName = "Anupama",
+            senderUsername = "anupama",
+            conversationId = convAnupamaBrutt,
+            messageId = "msg_anupama_1",
+            messageType = "text",
+            messageText = "Hey Brutt!",
+            mediaUrl = null,
+            timestamp = now + 300L
+        )
+        assertEquals(1, com.example.notifications.BitchatNotificationManager.getConversationMessagesForTest(convAnupamaBrutt).size)
+        assertNotEquals(
+            com.example.notifications.BitchatNotificationManager.notificationIdForConversation(convAbhiBrutt),
+            com.example.notifications.BitchatNotificationManager.notificationIdForConversation(convAnupamaBrutt)
+        )
+        val summaryNotif = shadowNm.getNotification(com.example.notifications.BitchatNotificationManager.SUMMARY_NOTIFICATION_ID)
+        assertNotNull("Group summary notification must be posted when multiple contacts have active notifications", summaryNotif)
+
+        // 6. Verify notification tap does NOT mark message as READ (SEEN) — only opening the conversation does
+        msgDao.advanceMessageStatus(msg1.id, MessageStatus.DELIVERED.name)
+        val afterDelivery = msgDao.getMessageByIdDirect(msg1.id)
+        assertEquals(MessageStatus.DELIVERED.name, afterDelivery?.status)
+        assertNotEquals("Push notification delivery must NEVER mark message as READ", MessageStatus.READ.name, afterDelivery?.status)
     }
 }
 

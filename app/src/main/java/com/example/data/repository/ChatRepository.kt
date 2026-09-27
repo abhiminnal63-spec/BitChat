@@ -13,6 +13,8 @@ import com.example.data.model.UserEntity
 import com.example.data.model.buildDeterministicConversationId
 import com.example.data.realtime.RealtimeManager
 import com.example.data.relay.GlobalRelayEngine
+import com.example.notifications.BitchatNotificationManager
+import com.example.notifications.DeviceTokenManager
 import com.example.util.ImageUtils
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -157,10 +159,24 @@ class ChatRepository(
     }
 
     fun enterConversationScreen(conversationId: String, currentUserId: String? = null) {
+        appContext?.let { ctx ->
+            BitchatNotificationManager.cancelNotificationForConversation(ctx, conversationId)
+        }
         relayEngine?.subscribeToConversation(conversationId)
         if (currentUserId != null) {
             firestoreSyncManager?.subscribeToConversation(conversationId, currentUserId)
+            repoScope.launch {
+                firestoreSyncManager?.synchronizeOfflineMessagesForUser(currentUserId)
+                relayEngine?.synchronizeOfflineMessagesForUser(currentUserId)
+            }
         }
+    }
+
+    suspend fun synchronizeOfflineMessages(userId: String): Int = withContext(Dispatchers.IO) {
+        if (userId.isBlank()) return@withContext 0
+        val fsSynced = firestoreSyncManager?.synchronizeOfflineMessagesForUser(userId) ?: 0
+        val relaySynced = relayEngine?.synchronizeOfflineMessagesForUser(userId) ?: 0
+        fsSynced + relaySynced
     }
 
     fun exitConversationScreen(conversationId: String) {
@@ -389,6 +405,21 @@ class ChatRepository(
                 val latestMsg = messageDao.getMessageByIdDirect(message.id)
                 val finalStatus = latestMsg?.status ?: MessageStatus.SENT.name
                 conversationDao.updateLastMessageStatus(message.conversationId, finalStatus)
+
+                // Store message permanently FIRST, then dispatch FCM push notification to recipient's registered devices
+                try {
+                    val recipientDevices = DeviceTokenManager.getRegisteredDevicesForUser(
+                        userId = message.recipientId,
+                        userDao = userDao,
+                        firestoreSyncManager = firestoreSyncManager
+                    )
+                    firestoreSyncManager?.enqueuePushNotificationInCloud(
+                        message = messageToPublish.copy(status = finalStatus),
+                        senderDisplayName = senderProfile?.displayName?.ifBlank { senderProfile.username } ?: "Contact",
+                        devices = recipientDevices
+                    )
+                } catch (_: Exception) {
+                }
             } else {
                 messageDao.advanceMessageStatus(message.id, MessageStatus.FAILED.name)
                 conversationDao.updateLastMessageStatus(message.conversationId, MessageStatus.FAILED.name)
@@ -417,6 +448,9 @@ class ChatRepository(
     }
 
     suspend fun markConversationAsRead(conversationId: String, readerId: String) = withContext(Dispatchers.IO) {
+        appContext?.let { ctx ->
+            BitchatNotificationManager.cancelNotificationForConversation(ctx, conversationId)
+        }
         val unreadCount = messageDao.getUnreadCount(conversationId, readerId)
         messageDao.updateStatusForConversation(
             conversationId = conversationId,

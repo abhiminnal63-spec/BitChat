@@ -9,11 +9,13 @@ import com.example.data.model.ConversationEntity
 import com.example.data.model.MessageEntity
 import com.example.data.model.MessageStatus
 import com.example.data.model.UserConversationStateEntity
+import com.example.data.model.UserDeviceEntity
 import com.example.data.model.UserEntity
 import com.example.data.model.buildDeterministicConversationId
 import com.example.data.model.cleanDisplayUsername
 import com.example.data.model.normalizeUsername
 import com.example.data.realtime.RealtimeManager
+import com.example.notifications.BitchatNotificationManager
 import com.google.firebase.FirebaseApp
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
@@ -102,7 +104,7 @@ class FirestoreSyncManager(
 
             val displayName = doc.getString("displayName") ?: cleanUser
             val avatarSeed = doc.getString("photoURL") ?: doc.getString("avatarSeed") ?: "BRUTAL_1"
-            val statusMessage = doc.getString("statusMessage") ?: "Available on Easapp"
+            val statusMessage = doc.getString("statusMessage") ?: "Available on BITCHAT"
             val createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
             val lastSeenTimestamp = doc.getLong("lastSeen")
                 ?: doc.getLong("lastSeenTimestamp")
@@ -350,6 +352,7 @@ class FirestoreSyncManager(
                                     }
 
                                     val isViewing = recipientId == currentUserId &&
+                                        RealtimeManager.isAppInForeground.value &&
                                         RealtimeManager.isUserViewingConversation(currentUserId, canonicalConvId)
 
                                     val effectiveStatus = when {
@@ -370,6 +373,7 @@ class FirestoreSyncManager(
                                         else -> cloudStatus
                                     }
 
+                                    val existingMsg = messageDao.getMessageByIdDirect(id)
                                     val message = MessageEntity(
                                         id = id,
                                         conversationId = canonicalConvId,
@@ -387,6 +391,20 @@ class FirestoreSyncManager(
                                     )
                                     messageDao.upsertMessageSafely(message)
                                     conversationDao.updateLastMessageStatus(canonicalConvId, effectiveStatus)
+
+                                    if (recipientId == currentUserId && existingMsg == null && effectiveStatus != MessageStatus.READ.name) {
+                                        val senderProfile = userDao.getUserByIdDirect(senderId)
+                                        val senderName = doc.getString("senderName")?.takeIf { it.isNotBlank() }
+                                            ?: senderProfile?.displayName?.takeIf { it.isNotBlank() }
+                                            ?: senderProfile?.username?.takeIf { it.isNotBlank() }
+                                            ?: "Contact"
+                                        BitchatNotificationManager.showIncomingMessageNotification(
+                                            context = context,
+                                            recipientId = currentUserId,
+                                            message = message,
+                                            senderDisplayName = senderName
+                                        )
+                                    }
                                 } catch (e: Exception) {
                                     Log.e(tag, "Message parse error: ${e.message}")
                                 }
@@ -665,11 +683,181 @@ class FirestoreSyncManager(
                 .document(message.id)
                 .set(msgMap, SetOptions.merge())
                 .await()
+            db.collection("messages")
+                .document(message.id)
+                .set(msgMap, SetOptions.merge())
+                .await()
             true
         } catch (e: Exception) {
             Log.e(tag, "Failed to sync message: ${e.message}")
             false
         }
+    }
+
+    suspend fun registerUserDeviceInCloud(device: UserDeviceEntity) = withContext(Dispatchers.IO) {
+        val db = firestore ?: return@withContext
+        try {
+            val deviceMap = hashMapOf<String, Any>(
+                "deviceId" to device.deviceId,
+                "fcmToken" to device.fcmToken,
+                "platform" to device.platform,
+                "updatedAt" to device.updatedAt
+            )
+            db.collection("users")
+                .document(device.userId)
+                .collection("devices")
+                .document(device.deviceId)
+                .set(deviceMap, SetOptions.merge())
+                .await()
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to register user device in cloud: ${e.message}")
+        }
+    }
+
+    suspend fun fetchUserDevicesFromCloud(userId: String): List<UserDeviceEntity> = withContext(Dispatchers.IO) {
+        val db = firestore ?: return@withContext emptyList()
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return@withContext emptyList()
+        try {
+            val snapshot = db.collection("users")
+                .document(cleanUid)
+                .collection("devices")
+                .get()
+                .await()
+            snapshot.documents.mapNotNull { doc ->
+                val token = doc.getString("fcmToken")?.trim() ?: return@mapNotNull null
+                if (token.isBlank()) return@mapNotNull null
+                val devId = doc.getString("deviceId")?.trim()?.ifBlank { doc.id } ?: doc.id
+                val platform = doc.getString("platform") ?: "android"
+                val updatedAt = doc.getLong("updatedAt") ?: System.currentTimeMillis()
+                UserDeviceEntity(
+                    userId = cleanUid,
+                    deviceId = devId,
+                    fcmToken = token,
+                    platform = platform,
+                    updatedAt = updatedAt
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to fetch user devices from cloud: ${e.message}")
+            emptyList()
+        }
+    }
+
+    suspend fun removeUserDeviceFromCloud(userId: String, deviceId: String) = withContext(Dispatchers.IO) {
+        val db = firestore ?: return@withContext
+        try {
+            db.collection("users")
+                .document(userId.trim())
+                .collection("devices")
+                .document(deviceId.trim())
+                .delete()
+                .await()
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to remove invalid device token from cloud: ${e.message}")
+        }
+    }
+
+    suspend fun enqueuePushNotificationInCloud(
+        message: MessageEntity,
+        senderDisplayName: String,
+        devices: List<UserDeviceEntity>
+    ) = withContext(Dispatchers.IO) {
+        val db = firestore ?: return@withContext
+        try {
+            val isImage = message.type.equals("image", ignoreCase = true) ||
+                !message.mediaUrl.isNullOrBlank() ||
+                !message.attachmentUri.isNullOrBlank()
+            val bodyPreview = BitchatNotificationManager.formatNotificationBody(
+                type = if (isImage) "image" else message.type,
+                content = message.content,
+                hasMedia = isImage
+            )
+            val pushDoc = hashMapOf<String, Any>(
+                "messageId" to message.id,
+                "conversationId" to message.conversationId,
+                "senderId" to message.senderId,
+                "receiverId" to message.recipientId,
+                "senderName" to senderDisplayName,
+                "appTitle" to "BITCHAT",
+                "type" to if (isImage) "image" else "text",
+                "text" to message.content,
+                "notificationBody" to bodyPreview,
+                "collapseKey" to "bitchat_conv_${message.conversationId}",
+                "notificationTag" to "bitchat_conv_${message.conversationId}",
+                "groupKey" to BitchatNotificationManager.GROUP_KEY_MESSAGES,
+                "channelId" to BitchatNotificationManager.CHANNEL_ID,
+                "fcmTokens" to devices.map { it.fcmToken },
+                "deviceIds" to devices.map { it.deviceId },
+                "createdAt" to message.timestamp,
+                "status" to "queued"
+            )
+            db.collection("push_notifications")
+                .document(message.id)
+                .set(pushDoc, SetOptions.merge())
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to enqueue push notification in cloud: ${e.message}")
+        }
+    }
+
+    suspend fun synchronizeOfflineMessagesForUser(recipientUid: String): Int {
+        return syncMissedMessagesForRecipient(recipientUid)
+    }
+
+    suspend fun syncMissedMessagesForRecipient(recipientUid: String): Int = withContext(Dispatchers.IO) {
+        val db = firestore ?: return@withContext 0
+        val cleanUid = recipientUid.trim()
+        if (cleanUid.isBlank()) return@withContext 0
+        var syncedCount = 0
+        try {
+            val snapshot = db.collection("messages")
+                .whereEqualTo("receiverId", cleanUid)
+                .get()
+                .await()
+            for (doc in snapshot.documents) {
+                val id = doc.getString("messageId") ?: doc.getString("id") ?: doc.id
+                val senderId = doc.getString("senderId") ?: ""
+                val receiverId = doc.getString("receiverId") ?: doc.getString("recipientId") ?: ""
+                if (senderId.isBlank() || receiverId != cleanUid) continue
+                val canonicalConvId = buildDeterministicConversationId(senderId, receiverId)
+                val content = doc.getString("text") ?: doc.getString("content") ?: ""
+                val timestamp = doc.getLong("createdAt") ?: doc.getLong("timestamp") ?: System.currentTimeMillis()
+                val cloudStatus = doc.getString("status") ?: MessageStatus.SENT.name
+                val rawType = doc.getString("type") ?: "text"
+                val mediaUrl = doc.getString("mediaUrl")?.ifBlank { null }
+                val attachmentUri = doc.getString("attachmentUri")?.ifBlank { null }
+                val isImage = rawType.equals("image", ignoreCase = true) || !mediaUrl.isNullOrBlank() || !attachmentUri.isNullOrBlank()
+
+                val isViewing = RealtimeManager.isAppInForeground.value &&
+                    RealtimeManager.isUserViewingConversation(cleanUid, canonicalConvId)
+                val nextStatus = when {
+                    isViewing -> MessageStatus.READ.name
+                    cloudStatus == MessageStatus.SENT.name -> MessageStatus.DELIVERED.name
+                    else -> cloudStatus
+                }
+                if (nextStatus != cloudStatus) {
+                    updateMessageStatusInCloud(canonicalConvId, id, nextStatus)
+                }
+                val msg = MessageEntity(
+                    id = id,
+                    conversationId = canonicalConvId,
+                    senderId = senderId,
+                    recipientId = receiverId,
+                    content = content,
+                    timestamp = timestamp,
+                    status = nextStatus,
+                    type = if (isImage) "image" else "text",
+                    mediaUrl = mediaUrl ?: attachmentUri,
+                    attachmentUri = attachmentUri ?: mediaUrl,
+                    attachmentType = if (isImage) "IMAGE" else null
+                )
+                messageDao.upsertMessageSafely(msg)
+                syncedCount++
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to sync missed messages for $cleanUid: ${e.message}")
+        }
+        syncedCount
     }
 
     suspend fun updateMessageStatusInCloud(conversationId: String, messageId: String, status: String) = withContext(Dispatchers.IO) {
@@ -678,6 +866,9 @@ class FirestoreSyncManager(
             db.collection("conversations")
                 .document(conversationId)
                 .collection("messages")
+                .document(messageId)
+                .update("status", status)
+            db.collection("messages")
                 .document(messageId)
                 .update("status", status)
             db.collection("conversations")

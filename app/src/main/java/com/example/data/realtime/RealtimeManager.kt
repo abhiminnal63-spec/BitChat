@@ -28,6 +28,14 @@ object RealtimeManager {
     private val _activeUserScreens = MutableStateFlow<Map<String, String>>(emptyMap())
     val activeUserScreens: StateFlow<Map<String, String>> = _activeUserScreens.asStateFlow()
 
+    // Tracks whether BITCHAT is in the foreground (true) or background/closed (false)
+    private val _isAppInForeground = MutableStateFlow(true)
+    val isAppInForeground: StateFlow<Boolean> = _isAppInForeground.asStateFlow()
+
+    fun setAppInForeground(inForeground: Boolean) {
+        _isAppInForeground.value = inForeground
+    }
+
     private var osNetworkAvailable = true
     private var manualOfflineOverride = false
     private var networkCallbackRegistered = false

@@ -125,7 +125,7 @@ class HomeViewModel(
                                     username = "",
                                     usernameNormalized = "",
                                     displayName = "Loading profile...",
-                                    statusMessage = "Available on Easapp",
+                                    statusMessage = "Available on BITCHAT",
                                     isOnline = false
                                 )
                             }
