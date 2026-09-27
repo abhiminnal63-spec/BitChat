@@ -206,3 +206,94 @@ Create your local environment configuration from:
 
 ```text
 .env.example
+```
+
+---
+
+# 🚀 Production Release & GitHub Releases
+
+BITCHAT includes automated, secure release signing and GitHub Releases deployment.
+
+### 1. Generating the Production Keystore Locally
+
+To create your permanent production signing key (run this once on your local machine):
+
+```bash
+keytool -genkeypair -v \
+  -keystore bitchat-release.jks \
+  -alias bitchat \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 10000 \
+  -storetype JKS
+```
+
+> ⚠️ **Important:**
+> - Keep `bitchat-release.jks` in a secure location backed up outside the git repository.
+> - Never commit keystore files or passwords to GitHub.
+
+---
+
+### 2. Building a Signed Production Release Locally
+
+Export your signing credentials as environment variables:
+
+```bash
+export BITCHAT_KEYSTORE_PATH="/absolute/path/to/bitchat-release.jks"
+export BITCHAT_KEYSTORE_PASSWORD="your-keystore-password"
+export BITCHAT_KEY_ALIAS="bitchat"
+export BITCHAT_KEY_PASSWORD="your-key-password"
+
+./gradlew assembleRelease
+```
+
+The resulting signed production APK will be generated at:
+```text
+app/build/outputs/apk/release/BitChat-release.apk
+```
+
+---
+
+### 3. Automated GitHub Releases via Git Tags
+
+GitHub Actions automatically builds and publishes production releases when a version tag is pushed.
+
+#### A. Configure GitHub Secrets in Repository Settings:
+
+Navigate to **Settings > Secrets and variables > Actions** and create the following repository secrets:
+
+| Secret Name | Description | Example / Format |
+|---|---|---|
+| `BITCHAT_KEYSTORE_BASE64` | Base64-encoded string of `bitchat-release.jks` | `cat bitchat-release.jks \| base64` |
+| `BITCHAT_KEYSTORE_PASSWORD` | Password protecting the keystore | `your-secure-store-password` |
+| `BITCHAT_KEY_ALIAS` | Key alias in the keystore | `bitchat` |
+| `BITCHAT_KEY_PASSWORD` | Password protecting the key alias | `your-secure-key-password` |
+
+To generate the `BITCHAT_KEYSTORE_BASE64` value on Linux/macOS:
+```bash
+base64 -w 0 bitchat-release.jks
+# or on macOS:
+base64 -i bitchat-release.jks
+```
+
+#### B. Tag and Trigger a Release:
+
+```bash
+# 1. Ensure your working tree is clean and on main
+git checkout main
+
+# 2. Create the version tag
+git tag v1.0.0
+
+# 3. Push the tag to GitHub
+git push origin v1.0.0
+```
+
+#### C. What GitHub Actions Does Automatically:
+1. Detects the `v*` tag push.
+2. Securely decodes the production keystore into a temporary runner directory.
+3. Builds the signed production APK with `./gradlew assembleRelease`.
+4. Calculates the official **SHA-256 Checksum** for download integrity.
+5. Names the asset consistently: `BITCHAT-v1.0.0.apk`.
+6. Creates a GitHub Release tagged `v1.0.0` with release notes and attached APK.
+7. Securely deletes the temporary keystore from the runner.

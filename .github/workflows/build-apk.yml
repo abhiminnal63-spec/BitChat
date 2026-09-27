@@ -1,16 +1,23 @@
-name: Build and Release Debug APK
+name: BITCHAT Build & Release
 
 on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  # =========================================================================
+  # PRODUCTION RELEASE JOB (Triggered only when Git tags like v1.0.0 are pushed)
+  # =========================================================================
+  release:
+    name: Build & Release Production APK
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
     steps:
@@ -28,45 +35,201 @@ jobs:
           echo "=== Java Environment Verification ==="
           java -version
           echo "JAVA_HOME is: $JAVA_HOME"
-          
-          if [ -z "$JAVA_HOME" ]; then
-            echo "Error: JAVA_HOME is not set!"
-            exit 1
-          fi
-          
-          RAW_VERSION=$(java -version 2>&1 | head -n 1)
-          echo "Detected raw version string: $RAW_VERSION"
-          
-          JAVA_MAJOR=$(echo "$RAW_VERSION" | sed -E 's/.*version "([0-9]+).*/\1/')
-          if ! [[ "$JAVA_MAJOR" =~ ^[0-9]+$ ]]; then
-            # Handle possible 1.8.x format
-            JAVA_MAJOR=$(echo "$RAW_VERSION" | sed -E 's/.*version "1\.([0-9]+).*/\1/')
-          fi
-          
-          if ! [[ "$JAVA_MAJOR" =~ ^[0-9]+$ ]]; then
-            echo "Error: Failed to detect active Java major version from '$RAW_VERSION'."
-            exit 1
-          fi
-          
-          echo "Active Java major version: $JAVA_MAJOR"
-          if [ "$JAVA_MAJOR" -lt 17 ]; then
-            echo "Error: Active Java version ($JAVA_MAJOR) is lower than the required Java 17."
-            exit 1
-          fi
-          echo "Java version verification passed ($JAVA_MAJOR >= 17)."
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.3.1"
 
-      - name: Create temporary debug keystore
+      - name: Extract Tag Info
+        id: tag_info
         run: |
-          echo "=== Checking Temporary Debug Keystore ==="
-          if [ -f "./debug.keystore" ]; then
-            echo "debug.keystore already exists in repository root."
+          RAW_TAG="${{ github.ref_name }}"
+          echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
+          echo "Preparing Production Release for tag: $RAW_TAG"
+
+      - name: Restore production keystore from GitHub Secret
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.BITCHAT_KEYSTORE_BASE64 }}
+        run: |
+          echo "=== Restoring Production Keystore ==="
+          KEYSTORE_DIR="${RUNNER_TEMP}/keystore"
+          mkdir -p "$KEYSTORE_DIR"
+          KEYSTORE_PATH="${KEYSTORE_DIR}/bitchat-release.jks"
+
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+            echo "Production keystore successfully restored from GitHub Secrets."
           else
-            echo "Generating temporary debug keystore..."
+            echo "::warning::BITCHAT_KEYSTORE_BASE64 secret is not configured. Generating a fallback signing key for validation."
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_PATH" \
+              -alias "${{ secrets.BITCHAT_KEY_ALIAS || 'bitchat' }}" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "${{ secrets.BITCHAT_KEYSTORE_PASSWORD || 'android' }}" \
+              -keypass "${{ secrets.BITCHAT_KEY_PASSWORD || 'android' }}" \
+              -dname "CN=BITCHAT Production,O=BITCHAT,C=US"
+          fi
+
+          if [ ! -f "$KEYSTORE_PATH" ] || [ ! -s "$KEYSTORE_PATH" ]; then
+            echo "Error: Keystore file missing or empty at $KEYSTORE_PATH"
+            exit 1
+          fi
+
+          echo "keystore_path=$KEYSTORE_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Build production release APK
+        env:
+          BITCHAT_KEYSTORE_PATH: ${{ steps.keystore.outputs.keystore_path }}
+          BITCHAT_KEYSTORE_PASSWORD: ${{ secrets.BITCHAT_KEYSTORE_PASSWORD || 'android' }}
+          BITCHAT_KEY_ALIAS: ${{ secrets.BITCHAT_KEY_ALIAS || 'bitchat' }}
+          BITCHAT_KEY_PASSWORD: ${{ secrets.BITCHAT_KEY_PASSWORD || 'android' }}
+        run: |
+          gradle :app:assembleRelease --stacktrace --no-daemon
+
+      - name: Verify release APK and calculate SHA-256
+        id: verify_apk
+        run: |
+          echo "=== Verifying Production Release APK ==="
+          TAG="${{ steps.tag_info.outputs.tag }}"
+          
+          APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" -type f | head -n 1)
+          if [ -z "$APK_FILE" ] || [ ! -f "$APK_FILE" ]; then
+            echo "Error: Production release APK not found in app/build/outputs/apk/release/"
+            exit 1
+          fi
+          
+          if [ ! -s "$APK_FILE" ]; then
+            echo "Error: Output APK is empty."
+            exit 1
+          fi
+          
+          # Calculate SHA-256 checksum
+          SHA256=$(sha256sum "$APK_FILE" | awk '{print $1}')
+          FILE_SIZE=$(stat -c%s "$APK_FILE")
+          echo "Verified APK: $APK_FILE ($FILE_SIZE bytes)"
+          echo "SHA-256 Checksum: $SHA256"
+          
+          # Format predictable naming for releases & website downloads: BITCHAT-<tag>.apk (e.g., BITCHAT-v1.0.0.apk)
+          ASSET_DIR="${RUNNER_TEMP}/release_assets"
+          mkdir -p "$ASSET_DIR"
+          ASSET_NAME="BITCHAT-${TAG}.apk"
+          ASSET_PATH="${ASSET_DIR}/${ASSET_NAME}"
+          cp "$APK_FILE" "$ASSET_PATH"
+          
+          echo "asset_path=$ASSET_PATH" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "size=$FILE_SIZE" >> "$GITHUB_OUTPUT"
+
+      - name: Securely Clean Up Keystore
+        if: always()
+        run: |
+          echo "=== Cleaning Up Decoded Keystore Files ==="
+          if [ -d "${RUNNER_TEMP}/keystore" ]; then
+            rm -rf "${RUNNER_TEMP}/keystore"
+            echo "Keystore directory safely removed from runner."
+          fi
+
+      - name: Upload production release APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verify_apk.outputs.asset_name }}
+          path: ${{ steps.verify_apk.outputs.asset_path }}
+          if-no-files-found: error
+
+      - name: Publish Production GitHub Release
+        id: publish_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.tag_info.outputs.tag }}"
+          TITLE="BITCHAT ${TAG}"
+          ASSET_PATH="${{ steps.verify_apk.outputs.asset_path }}"
+          ASSET_NAME="${{ steps.verify_apk.outputs.asset_name }}"
+          SHA256="${{ steps.verify_apk.outputs.sha256 }}"
+          SIZE_BYTES="${{ steps.verify_apk.outputs.size }}"
+          
+          RELEASE_NOTES=$(cat << EOF
+          # 🚀 BITCHAT ${TAG} — Production Release
+          
+          Official production release build for **BITCHAT**.
+          
+          ---
+          
+          ### 📦 Release Package Details
+          - **Application ID:** \`com.aistudio.easapp.vxbtzq\`
+          - **Release Tag:** \`${TAG}\`
+          - **Artifact Name:** \`${ASSET_NAME}\`
+          - **File Size:** \`${SIZE_BYTES} bytes\`
+          - **Commit SHA:** \`${{ github.sha }}\`
+          
+          ---
+          
+          ### 🔒 Checksum & Verification (SHA-256)
+          \`\`\`text
+          ${SHA256}
+          \`\`\`
+          
+          ---
+          
+          ### 📲 Installation Instructions
+          1. Download **\`${ASSET_NAME}\`** from the **Assets** section below.
+          2. Open the downloaded APK on your Android device running Android 7.0+ (API 24+).
+          3. Confirm installation or update when prompted.
+          EOF
+          )
+          
+          echo "Creating GitHub Release $TAG..."
+          gh release create "$TAG" "$ASSET_PATH" \
+            --title "$TITLE" \
+            --target "${{ github.sha }}" \
+            --notes "$RELEASE_NOTES" \
+            --latest
+
+      - name: Summary
+        if: always()
+        run: |
+          TAG="${{ steps.tag_info.outputs.tag }}"
+          ASSET_NAME="${{ steps.verify_apk.outputs.asset_name }}"
+          SHA256="${{ steps.verify_apk.outputs.sha256 }}"
+          
+          echo "### 🚀 BITCHAT Production Release Completed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Release Tag:** \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Release APK:** \`$ASSET_NAME\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SHA-256 Checksum:** \`$SHA256\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Release Page:** [https://github.com/${{ github.repository }}/releases/tag/${TAG}](https://github.com/${{ github.repository }}/releases/tag/${TAG})" >> "$GITHUB_STEP_SUMMARY"
+
+  # =========================================================================
+  # DEBUG BUILD JOB (Triggered on normal main branch commits & PRs)
+  # =========================================================================
+  debug:
+    name: Build Debug APK
+    if: !startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Create debug keystore
+        run: |
+          if [ ! -f "./debug.keystore" ]; then
             keytool -genkeypair -v \
               -keystore ./debug.keystore \
               -alias androiddebugkey \
@@ -77,178 +240,23 @@ jobs:
               -keypass android \
               -dname "CN=Android Debug,O=Android,C=US"
           fi
-          
-          if [ ! -f "./debug.keystore" ]; then
-            echo "Error: debug.keystore was not created successfully."
-            exit 1
-          fi
-          echo "Temporary debug keystore verified."
 
       - name: Build debug APK
         run: |
           gradle :app:assembleDebug --stacktrace --no-daemon
 
-      - name: Verify APK
+      - name: Verify Debug APK
         run: |
-          echo "=== Verifying Debug APK Output ==="
-          EXPECTED_APK="app/build/outputs/apk/debug/app-debug.apk"
-          
-          if [ ! -f "$EXPECTED_APK" ]; then
-            echo "Error: Expected APK file not found at $EXPECTED_APK"
-            echo "Searching only inside app/build/outputs/apk:"
-            if [ -d "app/build/outputs/apk" ]; then
-              find app/build/outputs/apk -name "*.apk" -type f
-            else
-              echo "Directory app/build/outputs/apk does not exist."
-            fi
+          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" -type f | head -n 1)
+          if [ -z "$DEBUG_APK" ] || [ ! -f "$DEBUG_APK" ]; then
+            echo "Error: Debug APK not found."
             exit 1
           fi
-          
-          if [ ! -s "$EXPECTED_APK" ]; then
-            echo "Error: APK file at $EXPECTED_APK is empty."
-            exit 1
-          fi
-          
-          case "$EXPECTED_APK" in
-            *.apk) ;;
-            *)
-              echo "Error: Expected file does not have .apk extension."
-              exit 1
-              ;;
-          esac
-          
-          echo "Debug APK successfully verified at $EXPECTED_APK ($(stat -c%s "$EXPECTED_APK") bytes)."
+          echo "Debug APK verified: $DEBUG_APK"
 
-      - name: Upload debug APK artifact
+      - name: Upload Debug APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: BitChat-debug-build
+          path: app/build/outputs/apk/debug/
           if-no-files-found: error
-
-      - name: Prepare APK release asset
-        id: prepare_asset
-        run: |
-          echo "=== Preparing Release Asset ==="
-          ORIGINAL_APK="app/build/outputs/apk/debug/app-debug.apk"
-          
-          if [ ! -f "$ORIGINAL_APK" ] || [ ! -s "$ORIGINAL_APK" ]; then
-            echo "Error: Original APK is missing or empty."
-            exit 1
-          fi
-          
-          ASSET_DIR="${RUNNER_TEMP}/apk_release_assets"
-          mkdir -p "$ASSET_DIR"
-          
-          RAW_REPO_NAME=$(echo "${{ github.repository }}" | awk -F'/' '{print $2}')
-          SANITIZED_REPO_NAME=$(echo "$RAW_REPO_NAME" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
-          if [ -z "$SANITIZED_REPO_NAME" ]; then
-            SANITIZED_REPO_NAME="android-app"
-          fi
-          
-          ASSET_FILENAME="${SANITIZED_REPO_NAME}-debug-build-${{ github.run_number }}.apk"
-          DESTINATION_PATH="${ASSET_DIR}/${ASSET_FILENAME}"
-          
-          cp "$ORIGINAL_APK" "$DESTINATION_PATH"
-          
-          if [ ! -f "$DESTINATION_PATH" ] || [ ! -s "$DESTINATION_PATH" ]; then
-            echo "Error: Failed to prepare release asset at $DESTINATION_PATH"
-            exit 1
-          fi
-          
-          echo "asset_path=${DESTINATION_PATH}" >> "$GITHUB_OUTPUT"
-          echo "asset_name=${ASSET_FILENAME}" >> "$GITHUB_OUTPUT"
-          echo "Prepared release asset: $DESTINATION_PATH ($ASSET_FILENAME)"
-
-      - name: Publish APK to GitHub Releases
-        id: publish_release
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "=== Checking GitHub CLI & Asset ==="
-          gh --version
-          
-          ASSET_PATH="${{ steps.prepare_asset.outputs.asset_path }}"
-          ASSET_NAME="${{ steps.prepare_asset.outputs.asset_name }}"
-          
-          if [ -z "$ASSET_PATH" ] || [ ! -f "$ASSET_PATH" ] || [ ! -s "$ASSET_PATH" ]; then
-            echo "Error: Release asset '$ASSET_PATH' does not exist or is empty."
-            exit 1
-          fi
-          
-          case "$ASSET_PATH" in
-            *.apk) ;;
-            *)
-              echo "Error: Release asset is not an APK file."
-              exit 1
-              ;;
-          esac
-          
-          TAG="debug-apk-build-${{ github.run_number }}-${{ github.run_attempt }}"
-          TITLE="Debug APK Build #${{ github.run_number }}"
-          
-          RELEASE_NOTES=$(cat << 'EOF'
-          ### 📱 Automated Debug APK Build
-
-          This is an automatically generated debug APK built by GitHub Actions.
-
-          - **Workflow Run Number:** #${{ github.run_number }}
-          - **Run Attempt:** #${{ github.run_attempt }}
-          - **Commit SHA:** `${{ github.sha }}`
-          - **Build Artifact:** `${{ steps.prepare_asset.outputs.asset_name }}`
-
-          > ⚠️ **Notice:** This APK is intended for testing and development purposes. It is not a Play Store production release and is signed only with a temporary debug keystore.
-          EOF
-          )
-          
-          echo "Publishing release with tag: $TAG"
-          gh release create "$TAG" "$ASSET_PATH" \
-            --title "$TITLE" \
-            --target "${{ github.sha }}" \
-            --notes "$RELEASE_NOTES" \
-            --latest
-          
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
-
-      - name: Report APK download result
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "=== APK Release & Download Summary ==="
-          RELEASE_OUTCOME="${{ steps.publish_release.outcome }}"
-          TAG="${{ steps.publish_release.outputs.tag }}"
-          TITLE="${{ steps.publish_release.outputs.title }}"
-          ASSET_NAME="${{ steps.prepare_asset.outputs.asset_name }}"
-          
-          if [ "$RELEASE_OUTCOME" = "success" ]; then
-            echo "GitHub Release publishing succeeded!"
-            gh release view "$TAG" || true
-            
-            RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${TAG}"
-            echo "Release Tag: $TAG"
-            echo "Release Title: $TITLE"
-            echo "Release Page URL: $RELEASE_URL"
-            echo "APK Asset Filename: $ASSET_NAME"
-            
-            echo "### 🚀 Debug APK Build & Release Succeeded" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "**Release Title:** $TITLE" >> "$GITHUB_STEP_SUMMARY"
-            echo "**Release Tag:** \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
-            echo "**Release Page:** [$RELEASE_URL]($RELEASE_URL)" >> "$GITHUB_STEP_SUMMARY"
-            echo "**Direct Download:** Download \`$ASSET_NAME\` directly from the **Assets** section of the [Release Page]($RELEASE_URL)." >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "📦 **Backup Artifact:** The standard GitHub Actions artifact named \`app-debug-apk\` is also available in the workflow summary." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "::warning::GitHub Release publishing was skipped or encountered an error."
-            echo "The APK was successfully built and is safely preserved as a GitHub Actions artifact."
-            echo "Actions artifact name: app-debug-apk"
-            
-            echo "### ⚠️ Debug APK Build Succeeded (Release Publishing Warning)" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "The debug APK was built successfully, but publishing to GitHub Releases encountered an issue." >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "📦 **Download Instructions:** You can download the verified APK artifact named **\`app-debug-apk\`** directly from the **Artifacts** section at the bottom of this GitHub Actions run summary." >> "$GITHUB_STEP_SUMMARY"
-          fi

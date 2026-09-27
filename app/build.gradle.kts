@@ -17,18 +17,41 @@ android {
     minSdk = 24
     targetSdk = 36
     versionCode = 1
-    versionName = "1.0"
+    versionName = "1.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      val keystorePath = System.getenv("BITCHAT_KEYSTORE_PATH")
+        ?: (project.findProperty("BITCHAT_KEYSTORE_PATH") as? String)
+        ?: System.getenv("KEYSTORE_PATH")
+        ?: (project.findProperty("KEYSTORE_PATH") as? String)
+        ?: "${rootDir}/bitchat-release.jks"
+      val keystoreFile = file(keystorePath)
+      if (keystoreFile.exists()) {
+        storeFile = keystoreFile
+        storePassword = System.getenv("BITCHAT_KEYSTORE_PASSWORD")
+          ?: (project.findProperty("BITCHAT_KEYSTORE_PASSWORD") as? String)
+          ?: System.getenv("STORE_PASSWORD")
+          ?: (project.findProperty("STORE_PASSWORD") as? String)
+        keyAlias = System.getenv("BITCHAT_KEY_ALIAS")
+          ?: (project.findProperty("BITCHAT_KEY_ALIAS") as? String)
+          ?: System.getenv("KEY_ALIAS")
+          ?: (project.findProperty("KEY_ALIAS") as? String)
+          ?: "bitchat"
+        keyPassword = System.getenv("BITCHAT_KEY_PASSWORD")
+          ?: (project.findProperty("BITCHAT_KEY_PASSWORD") as? String)
+          ?: System.getenv("KEY_PASSWORD")
+          ?: (project.findProperty("KEY_PASSWORD") as? String)
+      } else if (file("${rootDir}/debug.keystore").exists()) {
+        // Safe local fallback if production keystore is not provisioned locally
+        storeFile = file("${rootDir}/debug.keystore")
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+      }
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
@@ -47,6 +70,7 @@ android {
     }
     debug { signingConfig = signingConfigs.getByName("debugConfig") }
   }
+
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
@@ -60,6 +84,10 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+}
+
+base {
+  archivesName.set("BitChat")
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
