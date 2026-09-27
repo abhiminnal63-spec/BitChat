@@ -23,6 +23,7 @@ import com.example.R
 import com.example.data.model.MessageEntity
 import com.example.data.model.buildDeterministicConversationId
 import com.example.data.realtime.RealtimeManager
+import com.example.util.BitchatLog
 import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
 import org.json.JSONObject
@@ -284,7 +285,8 @@ object BitchatNotificationManager {
         context: Context,
         conversationId: String,
         otherUserId: String,
-        senderName: String = ""
+        senderName: String = "",
+        messageId: String = ""
     ): Intent {
         return Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -292,9 +294,17 @@ object BitchatNotificationManager {
                 Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(EXTRA_CONVERSATION_ID, conversationId)
             putExtra(EXTRA_CONVERSATION_ID_KEY, conversationId)
+            putExtra("chatId", conversationId)
             putExtra(EXTRA_OTHER_USER_ID, otherUserId)
             putExtra(EXTRA_SENDER_UID, otherUserId)
+            putExtra("senderId", otherUserId)
+            putExtra("senderUid", otherUserId)
             putExtra(EXTRA_SENDER_NAME, senderName)
+            putExtra("senderName", senderName)
+            if (messageId.isNotBlank()) {
+                putExtra("messageId", messageId)
+            }
+            putExtra("type", "chat_message")
             putExtra(EXTRA_FROM_NOTIFICATION, true)
         }
     }
@@ -366,10 +376,9 @@ object BitchatNotificationManager {
             return false
         }
 
-        // CASE 1: @brutt is online and actively inside the conversation -> do not create duplicate notification
-        if (shouldSuppressNotificationForActiveConversation(cleanRecipient, cleanConvId) ||
-            shouldSuppressNotificationForActiveConversation(cleanRecipient, message.conversationId.trim())
-        ) {
+        // REQUIREMENT 1: When BITCHAT is actively open in the foreground, NEVER display an Android system notification.
+        // If user is in the same chat -> chat UI updates in realtime. If on another screen -> chat list & unread count update.
+        if (RealtimeManager.isAppInForeground.value) {
             return false
         }
 
@@ -378,6 +387,7 @@ object BitchatNotificationManager {
             return false
         }
         markMessageNotified(context, cleanMsgId)
+        BitchatLog.fcmReceived(cleanMsgId, cleanConvId, cleanSender)
 
         ensureNotificationChannel(context)
         restoreGroupedLinesIfNeeded(context, cleanConvId)
@@ -416,7 +426,8 @@ object BitchatNotificationManager {
             context = context,
             conversationId = cleanConvId,
             otherUserId = cleanSender,
-            senderName = resolvedSenderName
+            senderName = resolvedSenderName,
+            messageId = cleanMsgId
         )
 
         val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {

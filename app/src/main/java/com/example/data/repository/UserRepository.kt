@@ -11,6 +11,7 @@ import com.example.data.realtime.RealtimeManager
 import com.example.data.relay.GlobalRelayEngine
 import com.example.notifications.BitchatNotificationManager
 import com.example.notifications.DeviceTokenManager
+import com.example.util.BitchatLog
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
@@ -30,6 +31,12 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+
+enum class AuthState {
+    INITIALIZING_AUTH,
+    AUTHENTICATED,
+    UNAUTHENTICATED
+}
 
 class UserRepository(
     private val userDao: UserDao,
@@ -60,6 +67,15 @@ class UserRepository(
 
     private val _currentUser = MutableStateFlow<UserEntity?>(null)
     val currentUser: StateFlow<UserEntity?> = _currentUser.asStateFlow()
+
+    private val _authState = MutableStateFlow<AuthState>(
+        if (prefs.getString("logged_in_user_id", null).isNullOrBlank()) {
+            AuthState.UNAUTHENTICATED
+        } else {
+            AuthState.AUTHENTICATED
+        }
+    )
+    val authState: StateFlow<AuthState> = _authState.asStateFlow()
 
     // Strictly tracks ONLY accounts that have authenticated with credentials on THIS physical device
     // Maps backend UID -> authVerifier
@@ -149,6 +165,9 @@ class UserRepository(
                     startPresenceHeartbeat()
                 } else {
                     _currentUserId.value = null
+                    _currentUser.value = null
+                    _authState.value = AuthState.UNAUTHENTICATED
+                    BitchatLog.authState("UNAUTHENTICATED", null)
                     prefs.edit()
                         .remove("logged_in_user_id")
                         .remove("logged_in_user_profile_json")
@@ -162,6 +181,7 @@ class UserRepository(
         isAppInForeground.value = true
         BitchatNotificationManager.setAppInForeground(true)
         val uid = _currentUserId.value ?: return
+        BitchatLog.presenceOnline(uid)
         com.example.notifications.BitchatPushService.ensureStarted(appContext, uid)
         scope.launch {
             val now = System.currentTimeMillis()
@@ -184,6 +204,7 @@ class UserRepository(
         heartbeatJob?.cancel()
         heartbeatJob = null
         val uid = _currentUserId.value ?: return
+        BitchatLog.presenceOffline(uid)
         com.example.notifications.BitchatPushService.ensureStarted(appContext, uid)
         scope.launch {
             val now = System.currentTimeMillis()
@@ -517,12 +538,15 @@ class UserRepository(
             userDao.updateOnlineStatus(id, false, now)
             firestoreSyncManager?.updatePresenceInCloud(id, false, now)
             relayEngine?.broadcastPresence(id, false, now, cacheInHistory = true)
+            BitchatLog.presenceOffline(id)
         }
         firestoreSyncManager?.stopSync()
         relayEngine?.stop()
 
         _currentUserId.value = null
         _currentUser.value = null
+        _authState.value = AuthState.UNAUTHENTICATED
+        BitchatLog.authState("UNAUTHENTICATED", null)
         prefs.edit()
             .remove("logged_in_user_id")
             .remove("logged_in_user_profile_json")
@@ -532,6 +556,9 @@ class UserRepository(
     private fun setSession(user: UserEntity, authVerifier: String) {
         _currentUserId.value = user.id
         _currentUser.value = user
+        _authState.value = AuthState.AUTHENTICATED
+        BitchatLog.authState("AUTHENTICATED", user.id)
+        BitchatLog.presenceOnline(user.id)
         saveLocalAuthenticatedSession(user, authVerifier)
         com.example.notifications.BitchatPushService.ensureStarted(appContext, user.id)
         startPresenceHeartbeat()

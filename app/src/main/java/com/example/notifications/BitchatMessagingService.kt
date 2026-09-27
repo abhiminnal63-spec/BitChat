@@ -10,6 +10,7 @@ import com.example.data.model.MessageStatus
 import com.example.data.model.buildDeterministicConversationId
 import com.example.data.realtime.RealtimeManager
 import com.example.data.relay.GlobalRelayEngine
+import com.example.util.BitchatLog
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import kotlinx.coroutines.CoroutineScope
@@ -124,6 +125,9 @@ class BitchatMessagingService : FirebaseMessagingService() {
                 attachmentUri = mediaUrl,
                 attachmentType = if (isImage) "IMAGE" else null
             )
+
+            BitchatLog.fcmReceived(messageId, conversationId, senderId)
+            BitchatLog.messageDelivered(messageId, conversationId, receiverId)
 
             val existingMsg = msgDao.getMessageByIdDirect(messageId)
             msgDao.upsertMessageSafely(incomingMsg)

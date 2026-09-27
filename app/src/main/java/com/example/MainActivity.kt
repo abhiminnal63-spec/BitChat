@@ -173,7 +173,43 @@ fun EasappApp(
 ) {
     val context = LocalContext.current
     val currentUserId by userRepository.currentUserId.collectAsState()
-    var currentScreen by remember { mutableStateOf<Screen>(Screen.Auth) }
+    val authState by userRepository.authState.collectAsState()
+
+    val initialScreen = remember {
+        val uid = userRepository.currentUserId.value
+        val target = pendingDeepLink
+        if (uid != null) {
+            if (target != null) {
+                val resolvedOtherId = target.otherUserId.ifBlank {
+                    target.conversationId
+                        .removePrefix("${uid}_")
+                        .removeSuffix("_$uid")
+                        .takeIf { it != target.conversationId }
+                        .orEmpty()
+                }
+                val resolvedConvId = target.conversationId.ifBlank {
+                    if (resolvedOtherId.isNotBlank()) {
+                        buildDeterministicConversationId(uid, resolvedOtherId)
+                    } else {
+                        ""
+                    }
+                }
+                if (resolvedConvId.isNotBlank() && resolvedOtherId.isNotBlank()) {
+                    Screen.Chat(
+                        conversationId = resolvedConvId,
+                        otherUserId = resolvedOtherId
+                    )
+                } else {
+                    Screen.Home
+                }
+            } else {
+                Screen.Home
+            }
+        } else {
+            Screen.Auth
+        }
+    }
+    var currentScreen by remember { mutableStateOf<Screen>(initialScreen) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),

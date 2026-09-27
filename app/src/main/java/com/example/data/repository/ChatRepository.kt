@@ -15,6 +15,7 @@ import com.example.data.realtime.RealtimeManager
 import com.example.data.relay.GlobalRelayEngine
 import com.example.notifications.BitchatNotificationManager
 import com.example.notifications.DeviceTokenManager
+import com.example.util.BitchatLog
 import com.example.util.ImageUtils
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -275,6 +276,7 @@ class ChatRepository(
 
         // Immediately insert into local DB so rapid consecutive messages appear in exact order without UI delay
         messageDao.insertMessage(pendingMessage)
+        BitchatLog.messageSendStart(messageId, canonicalConvId, recipientId)
 
         // Stop typing immediately once message is queued
         stopTyping(canonicalConvId, senderId, recipientId)
@@ -417,6 +419,7 @@ class ChatRepository(
                 val latestMsg = messageDao.getMessageByIdDirect(message.id)
                 val finalStatus = latestMsg?.status ?: MessageStatus.SENT.name
                 conversationDao.updateLastMessageStatus(message.conversationId, finalStatus)
+                BitchatLog.messageSendSuccess(message.id, message.conversationId)
 
                 // Store message permanently FIRST, then dispatch FCM push notification to recipient's registered devices
                 repoScope.launch {
@@ -445,6 +448,7 @@ class ChatRepository(
             } else {
                 messageDao.advanceMessageStatus(message.id, MessageStatus.FAILED.name)
                 conversationDao.updateLastMessageStatus(message.conversationId, MessageStatus.FAILED.name)
+                BitchatLog.messageSendFailure(message.id, message.conversationId, "Network or cloud write error")
             }
             backendConfirmed
         }
@@ -452,6 +456,7 @@ class ChatRepository(
 
     suspend fun retryMessage(messageId: String): Boolean = withContext(Dispatchers.IO) {
         val existing = messageDao.getMessageByIdDirect(messageId) ?: return@withContext false
+        BitchatLog.messageRetry(messageId, existing.conversationId)
         messageDao.advanceMessageStatus(messageId, MessageStatus.SENDING.name)
         conversationDao.updateLastMessageStatus(existing.conversationId, MessageStatus.SENDING.name)
 
@@ -489,6 +494,7 @@ class ChatRepository(
         appContext?.let { ctx ->
             BitchatNotificationManager.cancelNotificationForConversation(ctx, conversationId)
         }
+        BitchatLog.messageSeen(conversationId, conversationId, readerId)
         val unreadCount = messageDao.getUnreadCount(conversationId, readerId)
         messageDao.updateStatusForConversation(
             conversationId = conversationId,
