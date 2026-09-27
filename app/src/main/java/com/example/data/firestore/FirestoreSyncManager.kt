@@ -18,7 +18,9 @@ import com.example.data.realtime.RealtimeManager
 import com.example.notifications.BitchatNotificationManager
 import com.google.firebase.FirebaseApp
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.firestore.PersistentCacheSettings
 import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,6 +31,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+
+enum class FirestoreSyncState {
+    ONLINE_SYNC_ACTIVE,
+    OFFLINE_CACHE_ACTIVE,
+    ERROR_RECONNECTING,
+    CONNECTING
+}
 
 class FirestoreSyncManager(
     private val context: Context,
@@ -43,30 +52,122 @@ class FirestoreSyncManager(
     private val _isCloudConnected = MutableStateFlow(false)
     val isCloudConnected: StateFlow<Boolean> = _isCloudConnected.asStateFlow()
 
+    private val _syncState = MutableStateFlow(
+        if (RealtimeManager.isNetworkConnected.value) FirestoreSyncState.CONNECTING else FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+    )
+    val syncState: StateFlow<FirestoreSyncState> = _syncState.asStateFlow()
+
     private val listeners = mutableListOf<ListenerRegistration>()
     private val messageListeners = mutableMapOf<String, ListenerRegistration>()
     private val typingListeners = mutableMapOf<String, ListenerRegistration>()
     private val profileListeners = java.util.concurrent.ConcurrentHashMap<String, ListenerRegistration>()
     private val broadcastedMessageStatuses = java.util.concurrent.ConcurrentHashMap<String, String>()
     private var globalUsersListener: ListenerRegistration? = null
+    private var connectionHeartbeatListener: ListenerRegistration? = null
+    private var currentActiveUserId: String? = null
 
     init {
         initializeFirestore()
+        observeNetworkState()
+    }
+
+    private fun observeNetworkState() {
+        scope.launch {
+            RealtimeManager.isNetworkConnected.collect { connected ->
+                if (connected) {
+                    if (_syncState.value == FirestoreSyncState.OFFLINE_CACHE_ACTIVE) {
+                        _syncState.value = FirestoreSyncState.CONNECTING
+                    }
+                    try {
+                        firestore?.enableNetwork()
+                        val uid = currentActiveUserId
+                        if (!uid.isNullOrBlank()) {
+                            ensureSyncListeners(uid)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(tag, "Failed to enable network on reconnect: ${e.message}")
+                    }
+                } else {
+                    _syncState.value = FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+                    _isCloudConnected.value = false
+                }
+            }
+        }
     }
 
     private fun initializeFirestore() {
         try {
+            if (FirebaseApp.getApps(context).isEmpty()) {
+                FirebaseApp.initializeApp(context)
+            }
             if (FirebaseApp.getApps(context).isNotEmpty()) {
-                firestore = FirebaseFirestore.getInstance()
-                _isCloudConnected.value = true
-                Log.d(tag, "Firestore successfully initialized.")
+                val db = FirebaseFirestore.getInstance()
+                try {
+                    val settings = FirebaseFirestoreSettings.Builder()
+                        .setLocalCacheSettings(PersistentCacheSettings.newBuilder().build())
+                        .build()
+                    db.firestoreSettings = settings
+                } catch (e: Exception) {
+                    Log.w(tag, "Firestore settings already applied or using defaults: ${e.message}")
+                }
+                db.enableNetwork()
+                firestore = db
+                _isCloudConnected.value = RealtimeManager.isNetworkConnected.value
+                _syncState.value = if (RealtimeManager.isNetworkConnected.value) {
+                    FirestoreSyncState.ONLINE_SYNC_ACTIVE
+                } else {
+                    FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+                }
+                Log.d(tag, "Firestore successfully initialized with persistent cache & live network enabled.")
+                startGlobalUsersListener()
             } else {
-                Log.w(tag, "FirebaseApp is not initialized yet. Operating with GlobalRelayEngine cloud backend.")
+                Log.w(tag, "FirebaseApp is not initialized yet. Operating with local persistent cache and mesh fallback.")
                 _isCloudConnected.value = false
+                _syncState.value = FirestoreSyncState.OFFLINE_CACHE_ACTIVE
             }
         } catch (e: Exception) {
             Log.e(tag, "Firestore init error: ${e.message}")
             _isCloudConnected.value = false
+            _syncState.value = if (RealtimeManager.isNetworkConnected.value) FirestoreSyncState.ERROR_RECONNECTING else FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+        }
+    }
+
+    fun onAppForegrounded() {
+        try {
+            firestore?.enableNetwork()
+            val uid = currentActiveUserId
+            if (!uid.isNullOrBlank()) {
+                ensureSyncListeners(uid)
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Error in onAppForegrounded: ${e.message}")
+        }
+    }
+
+    private fun updateSyncStatusFromSnapshot(isFromCache: Boolean, hasError: Boolean) {
+        if (hasError) {
+            _syncState.value = if (RealtimeManager.isNetworkConnected.value) {
+                FirestoreSyncState.ERROR_RECONNECTING
+            } else {
+                FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+            }
+            _isCloudConnected.value = false
+            return
+        }
+
+        if (!isFromCache) {
+            _syncState.value = FirestoreSyncState.ONLINE_SYNC_ACTIVE
+            _isCloudConnected.value = true
+        } else {
+            if (RealtimeManager.isNetworkConnected.value) {
+                // Device has network, listening/fetching from server
+                if (_syncState.value != FirestoreSyncState.ONLINE_SYNC_ACTIVE) {
+                    _syncState.value = FirestoreSyncState.CONNECTING
+                }
+            } else {
+                _syncState.value = FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+                _isCloudConnected.value = false
+            }
         }
     }
 
@@ -77,9 +178,11 @@ class FirestoreSyncManager(
             globalUsersListener = db.collection("users").addSnapshotListener { snapshot, error ->
                 if (error != null) {
                     Log.e(tag, "Error listening to global users: ${error.message}")
+                    updateSyncStatusFromSnapshot(isFromCache = true, hasError = true)
                     return@addSnapshotListener
                 }
                 if (snapshot != null) {
+                    updateSyncStatusFromSnapshot(isFromCache = snapshot.metadata.isFromCache, hasError = false)
                     scope.launch {
                         for (doc in snapshot.documents) {
                             parseAndUpsertUserDoc(doc)
@@ -133,130 +236,145 @@ class FirestoreSyncManager(
     }
 
     fun startSync(currentUserId: String) {
+        currentActiveUserId = currentUserId
         val db = firestore ?: return
         stopSync()
+        ensureSyncListeners(currentUserId)
+    }
+
+    fun ensureSyncListeners(currentUserId: String) {
+        currentActiveUserId = currentUserId
+        val db = firestore ?: return
 
         try {
-            // 1. Listen to per-user conversation states: users/{uid}/conversations/{conversationId}
-            val userConvStatesReg = db.collection("users")
-                .document(currentUserId)
-                .collection("conversations")
-                .addSnapshotListener { snapshot, error ->
-                    if (error != null) {
-                        Log.e(tag, "Error listening to user conversation states: ${error.message}")
-                        return@addSnapshotListener
-                    }
-                    if (snapshot != null) {
-                        scope.launch {
-                            for (doc in snapshot.documents) {
-                                try {
-                                    val convId = doc.getString("conversationId") ?: doc.id
-                                    if (convId.isBlank()) continue
-                                    val otherUserId = doc.getString("otherUserId") ?: ""
-                                    val hidden = doc.getBoolean("hidden") ?: false
-                                    val deletedAt = doc.getLong("deletedAt") ?: 0L
-                                    val lastMessage = doc.getString("lastMessage") ?: ""
-                                    val lastMessageAt = doc.getLong("lastMessageAt") ?: 0L
-                                    val updatedAt = doc.getLong("updatedAt") ?: deletedAt
+            startGlobalUsersListener()
 
-                                    val existingState = conversationDao.getUserConversationStateDirect(currentUserId, convId)
-                                    if (existingState == null || updatedAt >= existingState.updatedAt || deletedAt >= existingState.deletedAt) {
-                                        conversationDao.upsertUserConversationState(
-                                            UserConversationStateEntity(
-                                                userId = currentUserId,
-                                                conversationId = convId,
-                                                otherUserId = otherUserId,
-                                                hidden = hidden,
-                                                deletedAt = maxOf(deletedAt, existingState?.deletedAt ?: 0L),
-                                                lastMessage = lastMessage,
-                                                lastMessageAt = lastMessageAt,
-                                                updatedAt = maxOf(updatedAt, existingState?.updatedAt ?: 0L)
+            if (listeners.isEmpty()) {
+                // 1. Listen to per-user conversation states: users/{uid}/conversations/{conversationId}
+                val userConvStatesReg = db.collection("users")
+                    .document(currentUserId)
+                    .collection("conversations")
+                    .addSnapshotListener { snapshot, error ->
+                        if (error != null) {
+                            Log.e(tag, "Error listening to user conversation states: ${error.message}")
+                            updateSyncStatusFromSnapshot(isFromCache = true, hasError = true)
+                            return@addSnapshotListener
+                        }
+                        if (snapshot != null) {
+                            updateSyncStatusFromSnapshot(isFromCache = snapshot.metadata.isFromCache, hasError = false)
+                            scope.launch {
+                                for (doc in snapshot.documents) {
+                                    try {
+                                        val convId = doc.getString("conversationId") ?: doc.id
+                                        if (convId.isBlank()) continue
+                                        val otherUserId = doc.getString("otherUserId") ?: ""
+                                        val hidden = doc.getBoolean("hidden") ?: false
+                                        val deletedAt = doc.getLong("deletedAt") ?: 0L
+                                        val lastMessage = doc.getString("lastMessage") ?: ""
+                                        val lastMessageAt = doc.getLong("lastMessageAt") ?: 0L
+                                        val updatedAt = doc.getLong("updatedAt") ?: deletedAt
+
+                                        val existingState = conversationDao.getUserConversationStateDirect(currentUserId, convId)
+                                        if (existingState == null || updatedAt >= existingState.updatedAt || deletedAt >= existingState.deletedAt) {
+                                            conversationDao.upsertUserConversationState(
+                                                UserConversationStateEntity(
+                                                    userId = currentUserId,
+                                                    conversationId = convId,
+                                                    otherUserId = otherUserId,
+                                                    hidden = hidden,
+                                                    deletedAt = maxOf(deletedAt, existingState?.deletedAt ?: 0L),
+                                                    lastMessage = lastMessage,
+                                                    lastMessageAt = lastMessageAt,
+                                                    updatedAt = maxOf(updatedAt, existingState?.updatedAt ?: 0L)
+                                                )
                                             )
-                                        )
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e(tag, "User conversation state parse error: ${e.message}")
                                     }
-                                } catch (e: Exception) {
-                                    Log.e(tag, "User conversation state parse error: ${e.message}")
                                 }
                             }
                         }
                     }
-                }
-            listeners.add(userConvStatesReg)
+                listeners.add(userConvStatesReg)
 
-            // 2. Listen to conversations where user is a participant
-            val convReg = db.collection("conversations")
-                .whereArrayContains("participants", currentUserId)
-                .addSnapshotListener { snapshot, error ->
-                    if (error != null) {
-                        Log.e(tag, "Error listening to conversations: ${error.message}")
-                        return@addSnapshotListener
-                    }
-                    if (snapshot != null) {
-                        scope.launch {
-                            for (doc in snapshot.documents) {
-                                try {
-                                    val participants = (doc.get("participants") as? List<*>)
-                                        ?.mapNotNull { it as? String }
-                                        ?: (doc.get("participantIds") as? List<*>)?.mapNotNull { it as? String }
-                                        ?: emptyList()
-                                    val p1 = doc.getString("participant1Id") ?: participants.getOrNull(0) ?: ""
-                                    val p2 = doc.getString("participant2Id") ?: participants.getOrNull(1) ?: ""
-                                    if (p1.isBlank() || p2.isBlank()) continue
-                                    if (p1 != currentUserId && p2 != currentUserId) continue
+                // 2. Listen to conversations where user is a participant
+                val convReg = db.collection("conversations")
+                    .whereArrayContains("participants", currentUserId)
+                    .addSnapshotListener { snapshot, error ->
+                        if (error != null) {
+                            Log.e(tag, "Error listening to conversations: ${error.message}")
+                            updateSyncStatusFromSnapshot(isFromCache = true, hasError = true)
+                            return@addSnapshotListener
+                        }
+                        if (snapshot != null) {
+                            updateSyncStatusFromSnapshot(isFromCache = snapshot.metadata.isFromCache, hasError = false)
+                            scope.launch {
+                                for (doc in snapshot.documents) {
+                                    try {
+                                        val participants = (doc.get("participants") as? List<*>)
+                                            ?.mapNotNull { it as? String }
+                                            ?: (doc.get("participantIds") as? List<*>)?.mapNotNull { it as? String }
+                                            ?: emptyList()
+                                        val p1 = doc.getString("participant1Id") ?: participants.getOrNull(0) ?: ""
+                                        val p2 = doc.getString("participant2Id") ?: participants.getOrNull(1) ?: ""
+                                        if (p1.isBlank() || p2.isBlank()) continue
+                                        if (p1 != currentUserId && p2 != currentUserId) continue
 
-                                    val canonicalId = buildDeterministicConversationId(p1, p2)
-                                    val sorted = listOf(p1, p2).sorted()
-                                    val lastText = doc.getString("lastMessage") ?: doc.getString("lastMessageText") ?: ""
-                                    val lastTime = doc.getLong("lastMessageAt") ?: doc.getLong("lastMessageTimestamp") ?: 0L
-                                    val lastSender = doc.getString("lastMessageSenderId") ?: ""
-                                    val lastStatus = doc.getString("lastMessageStatus") ?: MessageStatus.SENT.name
-                                    val unread1 = doc.getLong("unreadCountForUser1")?.toInt() ?: 0
-                                    val unread2 = doc.getLong("unreadCountForUser2")?.toInt() ?: 0
-                                    val updatedAt = doc.getLong("updatedAt") ?: System.currentTimeMillis()
+                                        val canonicalId = buildDeterministicConversationId(p1, p2)
+                                        val sorted = listOf(p1, p2).sorted()
+                                        val lastText = doc.getString("lastMessage") ?: doc.getString("lastMessageText") ?: ""
+                                        val lastTime = doc.getLong("lastMessageAt") ?: doc.getLong("lastMessageTimestamp") ?: 0L
+                                        val lastSender = doc.getString("lastMessageSenderId") ?: ""
+                                        val lastStatus = doc.getString("lastMessageStatus") ?: MessageStatus.SENT.name
+                                        val unread1 = doc.getLong("unreadCountForUser1")?.toInt() ?: 0
+                                        val unread2 = doc.getLong("unreadCountForUser2")?.toInt() ?: 0
+                                        val updatedAt = doc.getLong("updatedAt") ?: System.currentTimeMillis()
 
-                                    val conv = ConversationEntity(
-                                        id = canonicalId,
-                                        participant1Id = sorted[0],
-                                        participant2Id = sorted[1],
-                                        lastMessageText = lastText,
-                                        lastMessageTimestamp = lastTime,
-                                        lastMessageSenderId = lastSender,
-                                        lastMessageStatus = lastStatus,
-                                        unreadCountForUser1 = unread1,
-                                        unreadCountForUser2 = unread2,
-                                        updatedAt = updatedAt
-                                    )
-                                    conversationDao.insertConversation(conv)
+                                        val conv = ConversationEntity(
+                                            id = canonicalId,
+                                            participant1Id = sorted[0],
+                                            participant2Id = sorted[1],
+                                            lastMessageText = lastText,
+                                            lastMessageTimestamp = lastTime,
+                                            lastMessageSenderId = lastSender,
+                                            lastMessageStatus = lastStatus,
+                                            unreadCountForUser1 = unread1,
+                                            unreadCountForUser2 = unread2,
+                                            updatedAt = updatedAt
+                                        )
+                                        conversationDao.insertConversation(conv)
 
-                                    // Check inline typing fields on conversation document if present
-                                    val otherId = if (sorted[0] == currentUserId) sorted[1] else sorted[0]
-                                    if (otherId.isNotBlank()) {
-                                        val isOtherTypingField = doc.getBoolean("typing_$otherId")
-                                        val typingTimeField = doc.getLong("typingUpdatedAt_$otherId") ?: 0L
-                                        if (isOtherTypingField != null) {
-                                            val isFresh = (System.currentTimeMillis() - typingTimeField) < 10_000L
-                                            if (isOtherTypingField && isFresh) {
-                                                RealtimeManager.onUserTyping(canonicalId, otherId)
-                                            } else if (!isOtherTypingField) {
-                                                RealtimeManager.stopUserTyping(canonicalId, otherId)
+                                        // Check inline typing fields on conversation document if present
+                                        val otherId = if (sorted[0] == currentUserId) sorted[1] else sorted[0]
+                                        if (otherId.isNotBlank()) {
+                                            val isOtherTypingField = doc.getBoolean("typing_$otherId")
+                                            val typingTimeField = doc.getLong("typingUpdatedAt_$otherId") ?: 0L
+                                            if (isOtherTypingField != null) {
+                                                val isFresh = (System.currentTimeMillis() - typingTimeField) < 10_000L
+                                                if (isOtherTypingField && isFresh) {
+                                                    RealtimeManager.onUserTyping(canonicalId, otherId)
+                                                } else if (!isOtherTypingField) {
+                                                    RealtimeManager.stopUserTyping(canonicalId, otherId)
+                                                }
                                             }
                                         }
-                                    }
 
-                                    // Also listen to messages and typing states in this conversation
-                                    listenToConversationMessages(canonicalId, currentUserId)
-                                    listenToConversationTyping(canonicalId, currentUserId)
-                                } catch (e: Exception) {
-                                    Log.e(tag, "Conversation parse error: ${e.message}")
+                                        // Also listen to messages and typing states in this conversation
+                                        listenToConversationMessages(canonicalId, currentUserId)
+                                        listenToConversationTyping(canonicalId, currentUserId)
+                                    } catch (e: Exception) {
+                                        Log.e(tag, "Conversation parse error: ${e.message}")
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            listeners.add(convReg)
+                listeners.add(convReg)
 
-            // 3. Listen to FCM push notification queue for this recipient device
-            listenToFcmPushQueueForUser(currentUserId)
+                // 3. Listen to FCM push notification queue for this recipient device
+                listenToFcmPushQueueForUser(currentUserId)
+            }
         } catch (e: Exception) {
             Log.e(tag, "Error starting sync: ${e.message}")
         }
@@ -380,9 +498,11 @@ class FirestoreSyncManager(
                 .addSnapshotListener { snapshot, error ->
                     if (error != null) {
                         Log.e(tag, "Messages listener error: ${error.message}")
+                        updateSyncStatusFromSnapshot(isFromCache = true, hasError = true)
                         return@addSnapshotListener
                     }
                     if (snapshot != null) {
+                        updateSyncStatusFromSnapshot(isFromCache = snapshot.metadata.isFromCache, hasError = false)
                         scope.launch {
                             for (doc in snapshot.documents) {
                                 try {

@@ -2,6 +2,7 @@ package com.example.ui.profile
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.firestore.FirestoreSyncState
 import com.example.data.model.UserEntity
 import com.example.data.repository.UserRepository
 import com.example.ui.theme.EasappColorTheme
@@ -31,6 +32,8 @@ class ProfileViewModel(
     val selectedTheme: StateFlow<EasappColorTheme> = themeManager.selectedTheme
     val isCloudConnected: StateFlow<Boolean> = userRepository.firestoreSyncManager?.isCloudConnected
         ?: MutableStateFlow(false)
+    val firestoreSyncState: StateFlow<FirestoreSyncState> = userRepository.firestoreSyncManager?.syncState
+        ?: MutableStateFlow(FirestoreSyncState.OFFLINE_CACHE_ACTIVE)
     val isRelayConnected: StateFlow<Boolean> = userRepository.relayEngine?.isConnected
         ?: MutableStateFlow(false)
 

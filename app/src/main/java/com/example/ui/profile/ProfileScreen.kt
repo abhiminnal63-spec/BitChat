@@ -80,6 +80,7 @@ fun ProfileScreen(
     val isDarkMode by viewModel.isDarkMode.collectAsState()
     val selectedTheme by viewModel.selectedTheme.collectAsState()
     val isCloudConnected by viewModel.isCloudConnected.collectAsState()
+    val firestoreSyncState by viewModel.firestoreSyncState.collectAsState()
     val isRelayConnected by viewModel.isRelayConnected.collectAsState()
 
     BackHandler {
@@ -585,20 +586,31 @@ fun ProfileScreen(
                                 )
                             }
 
+                            val (fsText, fsColor, fsIcon) = when (firestoreSyncState) {
+                                com.example.data.firestore.FirestoreSyncState.ONLINE_SYNC_ACTIVE ->
+                                    Triple("FIRESTORE: ONLINE // SYNC ACTIVE", EasappOnlineGreen, Icons.Default.CloudDone)
+                                com.example.data.firestore.FirestoreSyncState.OFFLINE_CACHE_ACTIVE ->
+                                    Triple("FIRESTORE: OFFLINE // CACHE ACTIVE", colors.textSecondary, Icons.Default.CloudOff)
+                                com.example.data.firestore.FirestoreSyncState.ERROR_RECONNECTING ->
+                                    Triple("FIRESTORE: ERROR // RECONNECTING", EasappSecondary, Icons.Default.CloudOff)
+                                com.example.data.firestore.FirestoreSyncState.CONNECTING ->
+                                    Triple("FIRESTORE: CONNECTING // SYNCING...", colors.textSecondary, Icons.Default.CloudOff)
+                            }
+
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(
-                                    imageVector = if (isCloudConnected) Icons.Default.CloudDone else Icons.Default.CloudOff,
+                                    imageVector = fsIcon,
                                     contentDescription = null,
-                                    tint = if (isCloudConnected) EasappOnlineGreen else EasappSecondary,
+                                    tint = fsColor,
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = if (isCloudConnected) "FIRESTORE CLOUD ENGINE: ACTIVE // LIVE SYNC" else "FIRESTORE: STANDBY (OFFLINE ROOM CACHE ACTIVE)",
+                                    text = fsText,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     fontFamily = FontFamily.Monospace,
-                                    color = if (isCloudConnected) EasappOnlineGreen else colors.textSecondary
+                                    color = fsColor
                                 )
                             }
 

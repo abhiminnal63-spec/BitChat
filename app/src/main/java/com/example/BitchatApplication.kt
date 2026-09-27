@@ -39,11 +39,13 @@ class BitchatApplication : Application(), Application.ActivityLifecycleCallbacks
         val count = startedActivityCount.incrementAndGet()
         if (count >= 1) {
             BitchatNotificationManager.setAppInForeground(true)
+            FirestoreSyncManager.getInstance(applicationContext).onAppForegrounded()
         }
     }
 
     override fun onActivityResumed(activity: Activity) {
         BitchatNotificationManager.setAppInForeground(true)
+        FirestoreSyncManager.getInstance(applicationContext).onAppForegrounded()
     }
 
     override fun onActivityPaused(activity: Activity) {}

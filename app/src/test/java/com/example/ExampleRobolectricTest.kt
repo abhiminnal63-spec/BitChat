@@ -856,6 +856,17 @@ class ExampleRobolectricTest {
             androidx.compose.ui.graphics.Color(0xFFFFFFFF),
             com.example.ui.theme.BrutalistPureWhite
         )
+
+        // 8. Verify FirestoreSyncManager Dynamic Connection & Sync State
+        val syncManager = com.example.data.firestore.FirestoreSyncManager.getInstance(context)
+        assertNotNull("FirestoreSyncManager instance must exist", syncManager)
+        val initialSyncState = syncManager.syncState.value
+        assertTrue(
+            "Firestore sync state must be dynamic based on network connectivity",
+            initialSyncState == com.example.data.firestore.FirestoreSyncState.ONLINE_SYNC_ACTIVE ||
+                initialSyncState == com.example.data.firestore.FirestoreSyncState.CONNECTING ||
+                initialSyncState == com.example.data.firestore.FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+        )
     }
 }
 

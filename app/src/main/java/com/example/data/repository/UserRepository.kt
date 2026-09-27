@@ -180,6 +180,7 @@ class UserRepository(
     fun onAppForegrounded() {
         isAppInForeground.value = true
         BitchatNotificationManager.setAppInForeground(true)
+        firestoreSyncManager?.onAppForegrounded()
         val uid = _currentUserId.value ?: return
         BitchatLog.presenceOnline(uid)
         com.example.notifications.BitchatPushService.ensureStarted(appContext, uid)
