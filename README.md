@@ -1,6 +1,6 @@
 <div align="center">
-
-<img src="assets/icon.png" width="110" alt="BitChat Logo">
+  <img src="./assets/bitchat-poster.png" width="900" alt="BitChat">
+</div>
 
 # BitChat
 
