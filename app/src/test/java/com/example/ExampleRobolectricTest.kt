@@ -477,6 +477,44 @@ class ExampleRobolectricTest {
             java.io.File("app/src/main/res/font/shooting_star_bold.otf").exists()
         assertTrue("shooting_star_bold.otf font file must exist in res/font", fontFileExists)
 
+        // Verify 1024x1024 master launcher icon, adaptive icon layers, and all 5 mipmap densities
+        val masterIconFile = listOf(
+            java.io.File("src/main/ic_launcher-playstore.png"),
+            java.io.File("app/src/main/ic_launcher-playstore.png")
+        ).firstOrNull { it.exists() }
+        assertNotNull("1024x1024 master launcher icon must exist", masterIconFile)
+        val masterBitmap = android.graphics.BitmapFactory.decodeFile(masterIconFile!!.absolutePath)
+        assertNotNull("Master launcher icon must be a valid PNG bitmap", masterBitmap)
+        assertEquals(1024, masterBitmap.width)
+        assertEquals(1024, masterBitmap.height)
+
+        val expectedMipmapSizes = mapOf(
+            "mdpi" to 48,
+            "hdpi" to 72,
+            "xhdpi" to 96,
+            "xxhdpi" to 144,
+            "xxxhdpi" to 192
+        )
+        for ((density, expectedPx) in expectedMipmapSizes) {
+            val mipmapDir = listOf(
+                java.io.File("src/main/res/mipmap-$density"),
+                java.io.File("app/src/main/res/mipmap-$density")
+            ).firstOrNull { it.exists() }
+            assertNotNull("mipmap-$density directory must exist", mipmapDir)
+            val squarePng = java.io.File(mipmapDir!!, "ic_launcher.png")
+            val roundPng = java.io.File(mipmapDir, "ic_launcher_round.png")
+            assertTrue("mipmap-$density/ic_launcher.png must exist", squarePng.exists())
+            assertTrue("mipmap-$density/ic_launcher_round.png must exist", roundPng.exists())
+            val sqBmp = android.graphics.BitmapFactory.decodeFile(squarePng.absolutePath)
+            val rdBmp = android.graphics.BitmapFactory.decodeFile(roundPng.absolutePath)
+            assertEquals(expectedPx, sqBmp.width)
+            assertEquals(expectedPx, sqBmp.height)
+            assertEquals(expectedPx, rdBmp.width)
+            assertEquals(expectedPx, rdBmp.height)
+        }
+        assertNotNull(androidx.core.content.ContextCompat.getDrawable(context, R.drawable.ic_launcher_foreground))
+        assertNotNull(androidx.core.content.ContextCompat.getDrawable(context, R.drawable.ic_launcher_background))
+
         val userDao = database.userDao()
         val convDao = database.conversationDao()
         val msgDao = database.messageDao()

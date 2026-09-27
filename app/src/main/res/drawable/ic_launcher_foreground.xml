@@ -1,8 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item
-        android:width="66dp"
-        android:height="66dp"
-        android:drawable="@drawable/bitchat_icon_1790449346709"
-        android:gravity="center" />
-</layer-list>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Fluorescent green brutalist geometric 3D extrusion block -->
+    <path
+        android:fillColor="#BAFF1A"
+        android:pathData="M38.28,36.42 L29.70,42.12 L29.70,57.90 L34.62,63.06 L34.62,67.38 L37.98,70.74 L44.10,66.54 L54.24,68.58 L64.32,78.72 L68.88,73.38 L57.96,62.40 L44.04,59.70 L38.28,53.76 Z" />
+
+    <!-- Black brutalist chat bubble face -->
+    <path
+        android:fillColor="#0F0F0F"
+        android:pathData="M38.28,36.42 L40.50,34.56 L64.14,39.24 L70.68,45.84 L70.68,60.84 L66.60,63.96 L68.88,73.38 L57.96,62.40 L44.04,59.70 L38.28,53.76 Z" />
+
+    <!-- Left vertical rounded-pill eye (off-white) -->
+    <path
+        android:fillColor="#F7F6F1"
+        android:pathData="M45.96,46.62 A2.28,2.28 0 0,1 50.52,46.62 L50.52,52.86 A2.28,2.28 0 0,1 45.96,52.86 Z" />
+
+    <!-- Right vertical rounded-pill eye (off-white) -->
+    <path
+        android:fillColor="#F7F6F1"
+        android:pathData="M58.08,48.30 A2.28,2.28 0 0,1 62.64,48.30 L62.64,54.54 A2.28,2.28 0 0,1 58.08,54.54 Z" />
+
+    <!-- Three black radial burst wedges at top-right -->
+    <path
+        android:fillColor="#0F0F0F"
+        android:pathData="M64.14,29.28 L67.68,29.28 L66.42,38.10 L65.10,38.10 Z" />
+    <path
+        android:fillColor="#0F0F0F"
+        android:pathData="M74.22,32.76 L76.92,35.34 L69.48,41.04 L68.64,40.20 Z" />
+    <path
+        android:fillColor="#0F0F0F"
+        android:pathData="M71.34,43.44 L78.30,42.12 L78.30,45.84 L71.34,44.76 Z" />
+</vector>
