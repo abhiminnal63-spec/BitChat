@@ -22,6 +22,9 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -401,19 +404,59 @@ class ChatRepository(
                 lastSeenTimestamp = now
             )
             val receiverProfile = userDao.getUserByIdDirect(message.recipientId)
-
-            val fsOk = firestoreSyncManager?.syncMessageToCloud(messageToPublish) ?: false
-            firestoreSyncManager?.syncConversationToCloud(
-                conversation.copy(lastMessageStatus = MessageStatus.SENT.name)
+            val cachedRecipientDevices = DeviceTokenManager.getCachedDevicesForUser(
+                userId = message.recipientId,
+                userDao = userDao
             )
-            val relayOk = relayEngine?.publishMessageToCloud(
-                message = messageToPublish,
-                senderProfile = senderProfile,
-                receiverProfile = receiverProfile,
-                compactInlineImageUri = compactInlinePreview
-            ) ?: false
+            val updatedConversationForCloud = conversation.copy(lastMessageStatus = MessageStatus.SENT.name)
+
+            // Combine related Firestore writes into one atomic WriteBatch and run Firestore + Relay in parallel
+            var (fsOk, relayOk) = coroutineScope {
+                val fsDeferred = async {
+                    firestoreSyncManager?.syncMessageAndConversationToCloud(
+                        message = messageToPublish,
+                        conversation = updatedConversationForCloud
+                    ) ?: false
+                }
+                val relayDeferred = async {
+                    relayEngine?.publishMessageToCloud(
+                        message = messageToPublish,
+                        senderProfile = senderProfile,
+                        receiverProfile = receiverProfile,
+                        compactInlineImageUri = compactInlinePreview,
+                        recipientDevices = cachedRecipientDevices
+                    ) ?: false
+                }
+                fsDeferred.await() to relayDeferred.await()
+            }
+
+            // Do not mark a write as FAILED on the first transient blip if network is still active; retry once automatically
+            if (!fsOk && !relayOk && RealtimeManager.isNetworkConnected.value) {
+                delay(250L)
+                val retryResult = coroutineScope {
+                    val fsRetry = async {
+                        firestoreSyncManager?.syncMessageAndConversationToCloud(
+                            message = messageToPublish,
+                            conversation = updatedConversationForCloud
+                        ) ?: false
+                    }
+                    val relayRetry = async {
+                        relayEngine?.publishMessageToCloud(
+                            message = messageToPublish,
+                            senderProfile = senderProfile,
+                            receiverProfile = receiverProfile,
+                            compactInlineImageUri = compactInlinePreview,
+                            recipientDevices = cachedRecipientDevices
+                        ) ?: false
+                    }
+                    fsRetry.await() to relayRetry.await()
+                }
+                fsOk = retryResult.first
+                relayOk = retryResult.second
+            }
 
             val backendConfirmed = fsOk || relayOk
+            val queuedInFirestoreOfflinePersistence = firestoreSyncManager?.isMessageQueuedOffline(message.id) == true
             if (backendConfirmed) {
                 messageDao.advanceMessageStatus(message.id, MessageStatus.SENT.name)
                 val latestMsg = messageDao.getMessageByIdDirect(message.id)
@@ -421,30 +464,41 @@ class ChatRepository(
                 conversationDao.updateLastMessageStatus(message.conversationId, finalStatus)
                 BitchatLog.messageSendSuccess(message.id, message.conversationId)
 
-                // Store message permanently FIRST, then dispatch FCM push notification to recipient's registered devices
+                // Trigger push notification strictly as a non-blocking background side effect
                 repoScope.launch {
                     try {
                         val senderDisplayName = senderProfile?.displayName?.ifBlank { senderProfile.username } ?: "Contact"
-                        val recipientDevices = DeviceTokenManager.getRegisteredDevicesForUser(
-                            userId = message.recipientId,
-                            userDao = userDao,
-                            firestoreSyncManager = firestoreSyncManager,
-                            relayEngine = relayEngine
-                        )
+                        val recipientDevices = if (cachedRecipientDevices.isNotEmpty()) {
+                            cachedRecipientDevices
+                        } else {
+                            DeviceTokenManager.getRegisteredDevicesForUser(
+                                userId = message.recipientId,
+                                userDao = userDao,
+                                firestoreSyncManager = firestoreSyncManager,
+                                relayEngine = relayEngine
+                            )
+                        }
                         val storedMessage = messageToPublish.copy(status = finalStatus)
                         firestoreSyncManager?.enqueuePushNotificationInCloud(
                             message = storedMessage,
                             senderDisplayName = senderDisplayName,
                             devices = recipientDevices
                         )
-                        relayEngine?.publishFcmPushNotification(
-                            message = storedMessage,
-                            senderDisplayName = senderDisplayName,
-                            devices = recipientDevices
-                        )
+                        // Only send a separate FCM_PUSH relay packet if NEW_MESSAGE did not already carry the tokens
+                        if (!relayOk || (cachedRecipientDevices.isEmpty() && recipientDevices.isNotEmpty())) {
+                            relayEngine?.publishFcmPushNotification(
+                                message = storedMessage,
+                                senderDisplayName = senderDisplayName,
+                                devices = recipientDevices
+                            )
+                        }
                     } catch (_: Exception) {
                     }
                 }
+            } else if (queuedInFirestoreOfflinePersistence && RealtimeManager.isNetworkConnected.value) {
+                // Keep message in SENDING (optimistic local pending write) while Firestore offline persistence flushes it
+                messageDao.advanceMessageStatus(message.id, MessageStatus.SENDING.name)
+                conversationDao.updateLastMessageStatus(message.conversationId, MessageStatus.SENDING.name)
             } else {
                 messageDao.advanceMessageStatus(message.id, MessageStatus.FAILED.name)
                 conversationDao.updateLastMessageStatus(message.conversationId, MessageStatus.FAILED.name)

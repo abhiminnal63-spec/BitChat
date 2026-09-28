@@ -75,6 +75,8 @@ class BitchatPushService : Service() {
                 val uid = getLoggedInUserId(applicationContext)
                 if (!uid.isNullOrBlank() && RealtimeManager.isNetworkConnected.value) {
                     try {
+                        val firestore = FirestoreSyncManager.getInstance(applicationContext)
+                        firestore.startSync(uid)
                         val relay = GlobalRelayEngine.getInstance(applicationContext)
                         relay.ensurePushStreamConnected(uid)
                         relay.retryAllPendingOutgoingMessages(uid)

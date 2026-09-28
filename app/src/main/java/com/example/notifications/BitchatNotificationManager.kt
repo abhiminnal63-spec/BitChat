@@ -61,6 +61,32 @@ object BitchatNotificationManager {
         RealtimeManager.setAppInForeground(inForeground)
     }
 
+    /**
+     * Checks if the physical screen is interactive (on) and the keyguard (lock screen) is unlocked.
+     * When the phone is locked or screen is off, the user cannot see the app even if an Activity was previously resumed.
+     */
+    fun isDeviceInteractiveAndUnlocked(context: Context?): Boolean {
+        if (context == null) return true
+        return try {
+            val powerManager = context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+            val isInteractive = powerManager?.isInteractive ?: true
+            val keyguardManager = context.getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+            val isLocked = keyguardManager?.isKeyguardLocked ?: false
+            isInteractive && !isLocked
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    /**
+     * Returns true ONLY when the app is actively open in the foreground on an unlocked, interactive screen.
+     * Returns false when the app is in the background, on the home screen, minimized, or when the device is locked.
+     */
+    fun isAppEffectivelyInForeground(context: Context?): Boolean {
+        if (!RealtimeManager.isAppInForeground.value) return false
+        return isDeviceInteractiveAndUnlocked(context)
+    }
+
     fun setNotificationPermissionDenied(context: Context, denied: Boolean) {
         context.applicationContext
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -376,9 +402,9 @@ object BitchatNotificationManager {
             return false
         }
 
-        // REQUIREMENT 1: When BITCHAT is actively open in the foreground, NEVER display an Android system notification.
-        // If user is in the same chat -> chat UI updates in realtime. If on another screen -> chat list & unread count update.
-        if (RealtimeManager.isAppInForeground.value) {
+        // REQUIREMENT 1: When BITCHAT is actively open in the foreground on an unlocked screen, NEVER display an Android system notification.
+        // When backgrounded, on the home screen, or on the lock screen, ALWAYS display the notification.
+        if (isAppEffectivelyInForeground(context)) {
             return false
         }
 

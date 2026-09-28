@@ -15,11 +15,14 @@ import com.example.data.model.buildDeterministicConversationId
 import com.example.data.model.cleanDisplayUsername
 import com.example.data.model.normalizeUsername
 import com.example.data.realtime.RealtimeManager
+import com.example.data.relay.GlobalRelayEngine
 import com.example.notifications.BitchatNotificationManager
 import com.google.firebase.FirebaseApp
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.PersistentCacheSettings
 import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.CoroutineScope
@@ -28,9 +31,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 enum class FirestoreSyncState {
     ONLINE_SYNC_ACTIVE,
@@ -49,11 +54,11 @@ class FirestoreSyncManager(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var firestore: FirebaseFirestore? = null
-    private val _isCloudConnected = MutableStateFlow(false)
+    private val _isCloudConnected = MutableStateFlow(RealtimeManager.isNetworkConnected.value)
     val isCloudConnected: StateFlow<Boolean> = _isCloudConnected.asStateFlow()
 
     private val _syncState = MutableStateFlow(
-        if (RealtimeManager.isNetworkConnected.value) FirestoreSyncState.CONNECTING else FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+        if (RealtimeManager.isNetworkConnected.value) FirestoreSyncState.ONLINE_SYNC_ACTIVE else FirestoreSyncState.OFFLINE_CACHE_ACTIVE
     )
     val syncState: StateFlow<FirestoreSyncState> = _syncState.asStateFlow()
 
@@ -72,14 +77,43 @@ class FirestoreSyncManager(
     }
 
     private fun observeNetworkState() {
-        scope.launch {
+        scope.launch(Dispatchers.Unconfined) {
             RealtimeManager.isNetworkConnected.collect { connected ->
-                if (connected) {
-                    if (_syncState.value == FirestoreSyncState.OFFLINE_CACHE_ACTIVE) {
-                        _syncState.value = FirestoreSyncState.CONNECTING
-                    }
+                if (!connected) {
+                    _syncState.value = FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+                    _isCloudConnected.value = false
+                } else {
+                    _syncState.value = FirestoreSyncState.ONLINE_SYNC_ACTIVE
+                    _isCloudConnected.value = true
+                }
+            }
+        }
+        scope.launch {
+            val relayFlow = try {
+                GlobalRelayEngine.getInstance(context).isConnected
+            } catch (_: Exception) {
+                MutableStateFlow(false)
+            }
+            combine(RealtimeManager.isNetworkConnected, relayFlow) { connected, relayConnected ->
+                connected to relayConnected
+            }.collect { (connected, relayConnected) ->
+                if (!connected) {
+                    _syncState.value = FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+                    _isCloudConnected.value = false
+                    return@collect
+                }
+
+                val db = firestore
+                if (db != null) {
+                    _syncState.value = FirestoreSyncState.ONLINE_SYNC_ACTIVE
+                    _isCloudConnected.value = true
                     try {
-                        firestore?.enableNetwork()
+                        db.enableNetwork().addOnSuccessListener {
+                            if (RealtimeManager.isNetworkConnected.value) {
+                                _syncState.value = FirestoreSyncState.ONLINE_SYNC_ACTIVE
+                                _isCloudConnected.value = true
+                            }
+                        }
                         val uid = currentActiveUserId
                         if (!uid.isNullOrBlank()) {
                             ensureSyncListeners(uid)
@@ -88,8 +122,12 @@ class FirestoreSyncManager(
                         Log.e(tag, "Failed to enable network on reconnect: ${e.message}")
                     }
                 } else {
-                    _syncState.value = FirestoreSyncState.OFFLINE_CACHE_ACTIVE
-                    _isCloudConnected.value = false
+                    _isCloudConnected.value = true
+                    _syncState.value = if (relayConnected || RealtimeManager.isNetworkConnected.value) {
+                        FirestoreSyncState.ONLINE_SYNC_ACTIVE
+                    } else {
+                        FirestoreSyncState.CONNECTING
+                    }
                 }
             }
         }
@@ -110,7 +148,12 @@ class FirestoreSyncManager(
                 } catch (e: Exception) {
                     Log.w(tag, "Firestore settings already applied or using defaults: ${e.message}")
                 }
-                db.enableNetwork()
+                db.enableNetwork().addOnSuccessListener {
+                    if (RealtimeManager.isNetworkConnected.value) {
+                        _syncState.value = FirestoreSyncState.ONLINE_SYNC_ACTIVE
+                        _isCloudConnected.value = true
+                    }
+                }
                 firestore = db
                 _isCloudConnected.value = RealtimeManager.isNetworkConnected.value
                 _syncState.value = if (RealtimeManager.isNetworkConnected.value) {
@@ -121,9 +164,14 @@ class FirestoreSyncManager(
                 Log.d(tag, "Firestore successfully initialized with persistent cache & live network enabled.")
                 startGlobalUsersListener()
             } else {
-                Log.w(tag, "FirebaseApp is not initialized yet. Operating with local persistent cache and mesh fallback.")
-                _isCloudConnected.value = false
-                _syncState.value = FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+                Log.w(tag, "FirebaseApp is not initialized with google-services.json. Operating with live cloud sync relay and persistent cache.")
+                val online = RealtimeManager.isNetworkConnected.value
+                _isCloudConnected.value = online
+                _syncState.value = if (online) {
+                    FirestoreSyncState.ONLINE_SYNC_ACTIVE
+                } else {
+                    FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+                }
             }
         } catch (e: Exception) {
             Log.e(tag, "Firestore init error: ${e.message}")
@@ -134,7 +182,21 @@ class FirestoreSyncManager(
 
     fun onAppForegrounded() {
         try {
-            firestore?.enableNetwork()
+            if (RealtimeManager.isNetworkConnected.value) {
+                firestore?.enableNetwork()?.addOnSuccessListener {
+                    if (RealtimeManager.isNetworkConnected.value) {
+                        _syncState.value = FirestoreSyncState.ONLINE_SYNC_ACTIVE
+                        _isCloudConnected.value = true
+                    }
+                }
+                if (firestore == null) {
+                    _syncState.value = FirestoreSyncState.ONLINE_SYNC_ACTIVE
+                    _isCloudConnected.value = true
+                }
+            } else {
+                _syncState.value = FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+                _isCloudConnected.value = false
+            }
             val uid = currentActiveUserId
             if (!uid.isNullOrBlank()) {
                 ensureSyncListeners(uid)
@@ -145,13 +207,27 @@ class FirestoreSyncManager(
     }
 
     private fun updateSyncStatusFromSnapshot(isFromCache: Boolean, hasError: Boolean) {
-        if (hasError) {
-            _syncState.value = if (RealtimeManager.isNetworkConnected.value) {
-                FirestoreSyncState.ERROR_RECONNECTING
-            } else {
-                FirestoreSyncState.OFFLINE_CACHE_ACTIVE
-            }
+        if (!RealtimeManager.isNetworkConnected.value) {
+            _syncState.value = FirestoreSyncState.OFFLINE_CACHE_ACTIVE
             _isCloudConnected.value = false
+            return
+        }
+
+        if (hasError) {
+            // If a specific listener hit a rule/query error while network is online and relay is active,
+            // verify network enablement rather than leaving status stuck
+            val relayActive = try {
+                GlobalRelayEngine.getInstance(context).isConnected.value
+            } catch (_: Exception) {
+                false
+            }
+            if (relayActive) {
+                _syncState.value = FirestoreSyncState.ONLINE_SYNC_ACTIVE
+                _isCloudConnected.value = true
+            } else {
+                _syncState.value = FirestoreSyncState.ERROR_RECONNECTING
+                _isCloudConnected.value = false
+            }
             return
         }
 
@@ -159,14 +235,13 @@ class FirestoreSyncManager(
             _syncState.value = FirestoreSyncState.ONLINE_SYNC_ACTIVE
             _isCloudConnected.value = true
         } else {
-            if (RealtimeManager.isNetworkConnected.value) {
-                // Device has network, listening/fetching from server
-                if (_syncState.value != FirestoreSyncState.ONLINE_SYNC_ACTIVE) {
-                    _syncState.value = FirestoreSyncState.CONNECTING
+            // Initial emission came from local cache; enableNetwork callback or MetadataChanges.INCLUDE
+            // server emission will transition to ONLINE_SYNC_ACTIVE.
+            firestore?.enableNetwork()?.addOnSuccessListener {
+                if (RealtimeManager.isNetworkConnected.value) {
+                    _syncState.value = FirestoreSyncState.ONLINE_SYNC_ACTIVE
+                    _isCloudConnected.value = true
                 }
-            } else {
-                _syncState.value = FirestoreSyncState.OFFLINE_CACHE_ACTIVE
-                _isCloudConnected.value = false
             }
         }
     }
@@ -175,21 +250,23 @@ class FirestoreSyncManager(
         val db = firestore ?: return
         if (globalUsersListener != null) return
         try {
-            globalUsersListener = db.collection("users").addSnapshotListener { snapshot, error ->
-                if (error != null) {
-                    Log.e(tag, "Error listening to global users: ${error.message}")
-                    updateSyncStatusFromSnapshot(isFromCache = true, hasError = true)
-                    return@addSnapshotListener
-                }
-                if (snapshot != null) {
-                    updateSyncStatusFromSnapshot(isFromCache = snapshot.metadata.isFromCache, hasError = false)
-                    scope.launch {
-                        for (doc in snapshot.documents) {
-                            parseAndUpsertUserDoc(doc)
+            globalUsersListener = db.collection("users")
+                .limit(200)
+                .addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
+                    if (error != null) {
+                        Log.e(tag, "Error listening to global users: ${error.message}")
+                        updateSyncStatusFromSnapshot(isFromCache = true, hasError = true)
+                        return@addSnapshotListener
+                    }
+                    if (snapshot != null) {
+                        updateSyncStatusFromSnapshot(isFromCache = snapshot.metadata.isFromCache, hasError = false)
+                        scope.launch {
+                            for (doc in snapshot.documents) {
+                                parseAndUpsertUserDoc(doc)
+                            }
                         }
                     }
                 }
-            }
         } catch (e: Exception) {
             Log.e(tag, "Failed to start global users listener: ${e.message}")
         }
@@ -236,10 +313,15 @@ class FirestoreSyncManager(
     }
 
     fun startSync(currentUserId: String) {
-        currentActiveUserId = currentUserId
-        val db = firestore ?: return
-        stopSync()
-        ensureSyncListeners(currentUserId)
+        val cleanUid = currentUserId.trim()
+        if (cleanUid.isBlank()) return
+        // Avoid tearing down active listeners (which would drop messageListeners for open chats)
+        // unless the authenticated user actually changed.
+        if (currentActiveUserId != null && currentActiveUserId != cleanUid) {
+            stopSync()
+        }
+        currentActiveUserId = cleanUid
+        ensureSyncListeners(cleanUid)
     }
 
     fun ensureSyncListeners(currentUserId: String) {
@@ -254,7 +336,7 @@ class FirestoreSyncManager(
                 val userConvStatesReg = db.collection("users")
                     .document(currentUserId)
                     .collection("conversations")
-                    .addSnapshotListener { snapshot, error ->
+                    .addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
                         if (error != null) {
                             Log.e(tag, "Error listening to user conversation states: ${error.message}")
                             updateSyncStatusFromSnapshot(isFromCache = true, hasError = true)
@@ -301,7 +383,7 @@ class FirestoreSyncManager(
                 // 2. Listen to conversations where user is a participant
                 val convReg = db.collection("conversations")
                     .whereArrayContains("participants", currentUserId)
-                    .addSnapshotListener { snapshot, error ->
+                    .addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
                         if (error != null) {
                             Log.e(tag, "Error listening to conversations: ${error.message}")
                             updateSyncStatusFromSnapshot(isFromCache = true, hasError = true)
@@ -495,14 +577,15 @@ class FirestoreSyncManager(
             val reg = db.collection("conversations")
                 .document(conversationId)
                 .collection("messages")
-                .addSnapshotListener { snapshot, error ->
+                .addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
                     if (error != null) {
                         Log.e(tag, "Messages listener error: ${error.message}")
                         updateSyncStatusFromSnapshot(isFromCache = true, hasError = true)
                         return@addSnapshotListener
                     }
                     if (snapshot != null) {
-                        updateSyncStatusFromSnapshot(isFromCache = snapshot.metadata.isFromCache, hasError = false)
+                        val isSnapshotFromCache = snapshot.metadata.isFromCache
+                        updateSyncStatusFromSnapshot(isFromCache = isSnapshotFromCache, hasError = false)
                         scope.launch {
                             for (doc in snapshot.documents) {
                                 try {
@@ -516,6 +599,7 @@ class FirestoreSyncManager(
                                     val content = doc.getString("text") ?: doc.getString("content") ?: ""
                                     val timestamp = doc.getLong("createdAt") ?: doc.getLong("timestamp") ?: System.currentTimeMillis()
                                     val cloudStatus = doc.getString("status") ?: MessageStatus.SENT.name
+                                    val hasPendingWrites = doc.metadata.hasPendingWrites()
                                     val mediaUrl = doc.getString("mediaUrl")?.ifBlank { null }
                                     val attachmentUri = doc.getString("attachmentUri")?.ifBlank { null }
                                     val attachmentType = doc.getString("attachmentType")?.ifBlank { null }
@@ -531,11 +615,17 @@ class FirestoreSyncManager(
                                         userDao.recordPeerActivity(senderId, timestamp)
                                     }
 
+                                    val existingMsg = messageDao.getMessageByIdDirect(id)
+                                    val isAppForeground = BitchatNotificationManager.isAppEffectivelyInForeground(context)
                                     val isViewing = recipientId == currentUserId &&
-                                        RealtimeManager.isAppInForeground.value &&
+                                        isAppForeground &&
                                         RealtimeManager.isUserViewingConversation(currentUserId, canonicalConvId)
 
                                     val effectiveStatus = when {
+                                        // Outgoing optimistic write still in local pending queue: keep SENDING until server confirms
+                                        senderId == currentUserId && hasPendingWrites && existingMsg?.status == MessageStatus.SENDING.name -> {
+                                            MessageStatus.SENDING.name
+                                        }
                                         isViewing && cloudStatus != MessageStatus.READ.name -> {
                                             if (broadcastedMessageStatuses[id] != MessageStatus.READ.name) {
                                                 broadcastedMessageStatuses[id] = MessageStatus.READ.name
@@ -553,7 +643,6 @@ class FirestoreSyncManager(
                                         else -> cloudStatus
                                     }
 
-                                    val existingMsg = messageDao.getMessageByIdDirect(id)
                                     val message = MessageEntity(
                                         id = id,
                                         conversationId = canonicalConvId,
@@ -571,8 +660,23 @@ class FirestoreSyncManager(
                                     )
                                     messageDao.upsertMessageSafely(message)
                                     conversationDao.updateLastMessageStatus(canonicalConvId, effectiveStatus)
-                                    // Note: Firestore realtime conversation listeners update the chat UI only;
-                                    // Android system notifications are delivered via FCM push notifications.
+
+                                    // When the app is in the background, on the home screen, or on the lock screen,
+                                    // ensure incoming messages received via Firestore listeners trigger system notifications
+                                    // (deduplicated by messageId inside BitchatNotificationManager).
+                                    if (recipientId == currentUserId && !isViewing && !isAppForeground && effectiveStatus != MessageStatus.READ.name) {
+                                        val senderUser = userDao.getUserByIdDirect(senderId)
+                                        val senderName = doc.getString("senderName")?.takeIf { it.isNotBlank() }
+                                            ?: senderUser?.displayName?.takeIf { it.isNotBlank() }
+                                            ?: senderUser?.username?.takeIf { it.isNotBlank() }
+                                            ?: "Contact"
+                                        BitchatNotificationManager.showIncomingMessageNotification(
+                                            context = context.applicationContext,
+                                            recipientId = currentUserId,
+                                            message = message,
+                                            senderDisplayName = senderName
+                                        )
+                                    }
                                 } catch (e: Exception) {
                                     Log.e(tag, "Message parse error: ${e.message}")
                                 }
@@ -845,19 +949,114 @@ class FirestoreSyncManager(
                 "attachmentSize" to (message.attachmentSize ?: 0L),
                 "attachmentName" to (message.attachmentName ?: "")
             )
-            db.collection("conversations")
+            // Combine both message document writes into a single atomic WriteBatch instead of sequential awaits
+            val batch = db.batch()
+            val convMsgRef = db.collection("conversations")
                 .document(canonicalConvId)
                 .collection("messages")
                 .document(message.id)
-                .set(msgMap, SetOptions.merge())
-                .await()
-            db.collection("messages")
+            val rootMsgRef = db.collection("messages")
                 .document(message.id)
-                .set(msgMap, SetOptions.merge())
-                .await()
+            batch.set(convMsgRef, msgMap, SetOptions.merge())
+            batch.set(rootMsgRef, msgMap, SetOptions.merge())
+            withTimeoutOrNull(4_500L) {
+                batch.commit().await()
+            }
             true
         } catch (e: Exception) {
             Log.e(tag, "Failed to sync message: ${e.message}")
+            false
+        }
+    }
+
+    private val pendingOfflineMessageIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    fun isMessageQueuedOffline(messageId: String): Boolean {
+        return pendingOfflineMessageIds.contains(messageId)
+    }
+
+    suspend fun syncMessageAndConversationToCloud(
+        message: MessageEntity,
+        conversation: ConversationEntity
+    ): Boolean {
+        return syncMessageAndConversationBatch(message, conversation)
+    }
+
+    /**
+     * Combines the message write (`conversations/{id}/messages/{msgId}` + `messages/{msgId}`)
+     * and the conversation summary update (`conversations/{id}`) into a SINGLE atomic Firestore WriteBatch
+     * so sending a message requires only 1 network round-trip instead of 3 sequential writes.
+     */
+    suspend fun syncMessageAndConversationBatch(
+        message: MessageEntity,
+        conversation: ConversationEntity
+    ): Boolean = withContext(Dispatchers.IO) {
+        val db = firestore ?: return@withContext false
+        try {
+            pendingOfflineMessageIds.add(message.id)
+            val sorted = listOf(conversation.participant1Id, conversation.participant2Id).sorted()
+            val canonicalConvId = buildDeterministicConversationId(message.senderId, message.recipientId)
+            val isImage = message.type.equals("image", ignoreCase = true) ||
+                !message.mediaUrl.isNullOrBlank() ||
+                !message.attachmentUri.isNullOrBlank()
+            val msgMap = hashMapOf(
+                "messageId" to message.id,
+                "id" to message.id,
+                "conversationId" to canonicalConvId,
+                "senderId" to message.senderId,
+                "receiverId" to message.recipientId,
+                "recipientId" to message.recipientId,
+                "type" to if (isImage) "image" else "text",
+                "text" to message.content,
+                "content" to message.content,
+                "mediaUrl" to (message.mediaUrl ?: message.attachmentUri ?: ""),
+                "createdAt" to message.timestamp,
+                "timestamp" to message.timestamp,
+                "status" to MessageStatus.SENT.name,
+                "attachmentUri" to (message.attachmentUri ?: message.mediaUrl ?: ""),
+                "attachmentType" to (message.attachmentType ?: if (isImage) "IMAGE" else ""),
+                "attachmentSize" to (message.attachmentSize ?: 0L),
+                "attachmentName" to (message.attachmentName ?: "")
+            )
+            val convMap = hashMapOf(
+                "id" to canonicalConvId,
+                "participant1Id" to sorted[0],
+                "participant2Id" to sorted[1],
+                "participants" to sorted,
+                "participantIds" to sorted,
+                "lastMessage" to conversation.lastMessageText,
+                "lastMessageText" to conversation.lastMessageText,
+                "lastMessageAt" to conversation.lastMessageTimestamp,
+                "lastMessageTimestamp" to conversation.lastMessageTimestamp,
+                "lastMessageSenderId" to conversation.lastMessageSenderId,
+                "lastMessageStatus" to MessageStatus.SENT.name,
+                "unreadCountForUser1" to conversation.unreadCountForUser1,
+                "unreadCountForUser2" to conversation.unreadCountForUser2,
+                "createdAt" to conversation.updatedAt,
+                "updatedAt" to conversation.updatedAt
+            )
+            val batch = db.batch()
+            val convMsgRef = db.collection("conversations")
+                .document(canonicalConvId)
+                .collection("messages")
+                .document(message.id)
+            val rootMsgRef = db.collection("messages")
+                .document(message.id)
+            val convRef = db.collection("conversations")
+                .document(canonicalConvId)
+            batch.set(convMsgRef, msgMap, SetOptions.merge())
+            batch.set(rootMsgRef, msgMap, SetOptions.merge())
+            batch.set(convRef, convMap, SetOptions.merge())
+            val committed = withTimeoutOrNull(4_500L) {
+                batch.commit().await()
+                true
+            } ?: false
+            if (committed) {
+                pendingOfflineMessageIds.remove(message.id)
+            }
+            committed
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to batch sync message and conversation: ${e.message}")
             false
         }
     }
@@ -871,12 +1070,19 @@ class FirestoreSyncManager(
                 "platform" to device.platform,
                 "updatedAt" to device.updatedAt
             )
-            db.collection("users")
-                .document(device.userId)
-                .collection("devices")
-                .document(device.deviceId)
-                .set(deviceMap, SetOptions.merge())
-                .await()
+            val userTokenUpdate = hashMapOf<String, Any>(
+                "fcmToken" to device.fcmToken,
+                "fcmTokens" to FieldValue.arrayUnion(device.fcmToken),
+                "tokenUpdatedAt" to device.updatedAt
+            )
+            val batch = db.batch()
+            val userRef = db.collection("users").document(device.userId)
+            val deviceRef = userRef.collection("devices").document(device.deviceId)
+            batch.set(deviceRef, deviceMap, SetOptions.merge())
+            batch.set(userRef, userTokenUpdate, SetOptions.merge())
+            withTimeoutOrNull(4_000L) {
+                batch.commit().await()
+            }
         } catch (e: Exception) {
             Log.e(tag, "Failed to register user device in cloud: ${e.message}")
         }
@@ -887,11 +1093,13 @@ class FirestoreSyncManager(
         val cleanUid = userId.trim()
         if (cleanUid.isBlank()) return@withContext emptyList()
         try {
-            val snapshot = db.collection("users")
-                .document(cleanUid)
-                .collection("devices")
-                .get()
-                .await()
+            val snapshot = withTimeoutOrNull(3_500L) {
+                db.collection("users")
+                    .document(cleanUid)
+                    .collection("devices")
+                    .get()
+                    .await()
+            } ?: return@withContext emptyList()
             snapshot.documents.mapNotNull { doc ->
                 val token = doc.getString("fcmToken")?.trim() ?: return@mapNotNull null
                 if (token.isBlank()) return@mapNotNull null
@@ -912,17 +1120,34 @@ class FirestoreSyncManager(
         }
     }
 
-    suspend fun removeUserDeviceFromCloud(userId: String, deviceId: String) = withContext(Dispatchers.IO) {
+    suspend fun removeUserDeviceFromCloud(
+        userId: String,
+        deviceId: String,
+        fcmToken: String? = null
+    ) = withContext(Dispatchers.IO) {
         val db = firestore ?: return@withContext
+        val cleanUid = userId.trim()
+        val cleanDevId = deviceId.trim()
+        if (cleanUid.isBlank() || cleanDevId.isBlank()) return@withContext
         try {
-            db.collection("users")
-                .document(userId.trim())
-                .collection("devices")
-                .document(deviceId.trim())
-                .delete()
-                .await()
+            val batch = db.batch()
+            val userRef = db.collection("users").document(cleanUid)
+            val deviceRef = userRef.collection("devices").document(cleanDevId)
+            batch.delete(deviceRef)
+            if (!fcmToken.isNullOrBlank()) {
+                batch.update(
+                    userRef,
+                    mapOf(
+                        "fcmTokens" to FieldValue.arrayRemove(fcmToken.trim()),
+                        "fcmToken" to ""
+                    )
+                )
+            }
+            withTimeoutOrNull(4_000L) {
+                batch.commit().await()
+            }
         } catch (e: Exception) {
-            Log.e(tag, "Failed to remove invalid device token from cloud: ${e.message}")
+            Log.e(tag, "Failed to remove device token from cloud: ${e.message}")
         }
     }
 
@@ -996,7 +1221,8 @@ class FirestoreSyncManager(
                 val attachmentUri = doc.getString("attachmentUri")?.ifBlank { null }
                 val isImage = rawType.equals("image", ignoreCase = true) || !mediaUrl.isNullOrBlank() || !attachmentUri.isNullOrBlank()
 
-                val isViewing = RealtimeManager.isAppInForeground.value &&
+                val isAppForeground = BitchatNotificationManager.isAppEffectivelyInForeground(context)
+                val isViewing = isAppForeground &&
                     RealtimeManager.isUserViewingConversation(cleanUid, canonicalConvId)
                 val nextStatus = when {
                     isViewing -> MessageStatus.READ.name
@@ -1020,6 +1246,19 @@ class FirestoreSyncManager(
                     attachmentType = if (isImage) "IMAGE" else null
                 )
                 messageDao.upsertMessageSafely(msg)
+                if (!isViewing && !isAppForeground && nextStatus != MessageStatus.READ.name) {
+                    val senderUser = userDao.getUserByIdDirect(senderId)
+                    val senderName = doc.getString("senderName")?.takeIf { it.isNotBlank() }
+                        ?: senderUser?.displayName?.takeIf { it.isNotBlank() }
+                        ?: senderUser?.username?.takeIf { it.isNotBlank() }
+                        ?: "Contact"
+                    BitchatNotificationManager.showIncomingMessageNotification(
+                        context = context.applicationContext,
+                        recipientId = cleanUid,
+                        message = msg,
+                        senderDisplayName = senderName
+                    )
+                }
                 syncedCount++
             }
         } catch (e: Exception) {
@@ -1031,17 +1270,19 @@ class FirestoreSyncManager(
     suspend fun updateMessageStatusInCloud(conversationId: String, messageId: String, status: String) = withContext(Dispatchers.IO) {
         val db = firestore ?: return@withContext
         try {
-            db.collection("conversations")
+            val batch = db.batch()
+            val convMsgRef = db.collection("conversations")
                 .document(conversationId)
                 .collection("messages")
                 .document(messageId)
-                .update("status", status)
-            db.collection("messages")
+            val rootMsgRef = db.collection("messages")
                 .document(messageId)
-                .update("status", status)
-            db.collection("conversations")
+            val convRef = db.collection("conversations")
                 .document(conversationId)
-                .update("lastMessageStatus", status)
+            batch.update(convMsgRef, "status", status)
+            batch.update(rootMsgRef, "status", status)
+            batch.update(convRef, "lastMessageStatus", status)
+            batch.commit()
         } catch (e: Exception) {
             Log.e(tag, "Failed to update message status in cloud: ${e.message}")
         }

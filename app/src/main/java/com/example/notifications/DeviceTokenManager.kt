@@ -110,6 +110,62 @@ object DeviceTokenManager {
         entity
     }
 
+    /**
+     * Unregisters the current physical device and its FCM token from the given user account
+     * on logout or account switch so notifications for the logged-out user never route to this device.
+     */
+    suspend fun unregisterDeviceForUser(
+        context: Context,
+        userId: String,
+        userDao: UserDao? = null,
+        firestoreSyncManager: FirestoreSyncManager? = null,
+        relayEngine: GlobalRelayEngine? = null
+    ) = withContext(Dispatchers.IO) {
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return@withContext
+        val deviceId = getOrCreateDeviceId(context)
+        val cachedToken = getCachedFcmToken(context)
+
+        val existingLocalDevices = userDao?.getDevicesForUserDirect(cleanUid) ?: emptyList()
+        inMemoryUserDevices.remove(cleanUid)
+        userDao?.deleteUserDevice(cleanUid, deviceId)
+        for (dev in existingLocalDevices) {
+            userDao?.deleteUserDevice(cleanUid, dev.deviceId)
+            firestoreSyncManager?.removeUserDeviceFromCloud(cleanUid, dev.deviceId, dev.fcmToken)
+            relayEngine?.publishUserDeviceRemoved(cleanUid, dev.deviceId, dev.fcmToken)
+        }
+        firestoreSyncManager?.removeUserDeviceFromCloud(cleanUid, deviceId, cachedToken)
+        relayEngine?.publishUserDeviceRemoved(cleanUid, deviceId, cachedToken)
+    }
+
+    suspend fun getCachedDevicesForUser(
+        userId: String,
+        userDao: UserDao? = null
+    ): List<UserDeviceEntity> = getFastCachedDevicesForUser(userId, userDao)
+
+    suspend fun getFastCachedDevicesForUser(
+        userId: String,
+        userDao: UserDao? = null
+    ): List<UserDeviceEntity> = withContext(Dispatchers.IO) {
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return@withContext emptyList()
+        val merged = linkedMapOf<String, UserDeviceEntity>()
+        inMemoryUserDevices[cleanUid]?.values?.forEach { dev ->
+            if (!invalidTokens.contains(dev.fcmToken)) {
+                merged[dev.deviceId] = dev
+            }
+        }
+        userDao?.getDevicesForUserDirect(cleanUid)?.forEach { dev ->
+            if (!invalidTokens.contains(dev.fcmToken)) {
+                val existing = merged[dev.deviceId]
+                if (existing == null || dev.updatedAt >= existing.updatedAt) {
+                    merged[dev.deviceId] = dev
+                }
+            }
+        }
+        merged.values.sortedByDescending { it.updatedAt }
+    }
+
     suspend fun syncDeviceFromCloud(
         device: UserDeviceEntity,
         userDao: UserDao? = null

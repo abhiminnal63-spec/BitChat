@@ -857,16 +857,41 @@ class ExampleRobolectricTest {
             com.example.ui.theme.BrutalistPureWhite
         )
 
-        // 8. Verify FirestoreSyncManager Dynamic Connection & Sync State
+        // 8. Verify FirestoreSyncManager Dynamic Connection & Sync State + Token Cleanup on Logout
         val syncManager = com.example.data.firestore.FirestoreSyncManager.getInstance(context)
         assertNotNull("FirestoreSyncManager instance must exist", syncManager)
-        val initialSyncState = syncManager.syncState.value
-        assertTrue(
-            "Firestore sync state must be dynamic based on network connectivity",
-            initialSyncState == com.example.data.firestore.FirestoreSyncState.ONLINE_SYNC_ACTIVE ||
-                initialSyncState == com.example.data.firestore.FirestoreSyncState.CONNECTING ||
-                initialSyncState == com.example.data.firestore.FirestoreSyncState.OFFLINE_CACHE_ACTIVE
+        RealtimeManager.setNetworkConnected(true)
+        syncManager.startSync(bruttUid)
+        assertEquals(
+            "Firestore sync state must resolve to ONLINE_SYNC_ACTIVE when online (never stuck in CONNECTING)",
+            com.example.data.firestore.FirestoreSyncState.ONLINE_SYNC_ACTIVE,
+            syncManager.syncState.value
         )
+
+        RealtimeManager.setNetworkConnected(false)
+        assertEquals(
+            "Firestore sync state must transition to OFFLINE_CACHE_ACTIVE when network is lost",
+            com.example.data.firestore.FirestoreSyncState.OFFLINE_CACHE_ACTIVE,
+            syncManager.syncState.value
+        )
+
+        RealtimeManager.setNetworkConnected(true)
+        assertEquals(
+            "Firestore sync state must recover to ONLINE_SYNC_ACTIVE when network is restored",
+            com.example.data.firestore.FirestoreSyncState.ONLINE_SYNC_ACTIVE,
+            syncManager.syncState.value
+        )
+
+        // Verify FCM token is removed when user logs out / unregisters device
+        com.example.notifications.DeviceTokenManager.unregisterDeviceForUser(
+            context = context,
+            userId = bruttUid,
+            userDao = database.userDao(),
+            firestoreSyncManager = syncManager,
+            relayEngine = null
+        )
+        val remainingBruttDevices = database.userDao().getDevicesForUserDirect(bruttUid)
+        assertTrue("All device tokens for logged-out user must be removed", remainingBruttDevices.isEmpty())
     }
 }
 

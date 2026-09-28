@@ -14,12 +14,13 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class BitchatApplication : Application(), Application.ActivityLifecycleCallbacks {
 
-    private val startedActivityCount = AtomicInteger(0)
-
     override fun onCreate() {
         super.onCreate()
         BitchatNotificationManager.ensureNotificationChannel(applicationContext)
         RealtimeManager.initNetworkMonitoring(applicationContext)
+        // On cold process start (which may be triggered in the background by FCM, JobScheduler, or BroadcastReceiver),
+        // mark app as backgrounded until an Activity actually starts.
+        BitchatNotificationManager.setAppInForeground(startedActivityCount.get() > 0)
         registerActivityLifecycleCallbacks(this)
 
         val prefs = applicationContext.getSharedPreferences("easapp_session_prefs", Context.MODE_PRIVATE)
@@ -48,7 +49,12 @@ class BitchatApplication : Application(), Application.ActivityLifecycleCallbacks
         FirestoreSyncManager.getInstance(applicationContext).onAppForegrounded()
     }
 
-    override fun onActivityPaused(activity: Activity) {}
+    override fun onActivityPaused(activity: Activity) {
+        if (!BitchatNotificationManager.isDeviceInteractiveAndUnlocked(applicationContext)) {
+            BitchatNotificationManager.setAppInForeground(false)
+            RealtimeManager.clearAllActiveConversations()
+        }
+    }
 
     override fun onActivityStopped(activity: Activity) {
         val count = startedActivityCount.decrementAndGet().coerceAtLeast(0)
@@ -64,4 +70,11 @@ class BitchatApplication : Application(), Application.ActivityLifecycleCallbacks
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
 
     override fun onActivityDestroyed(activity: Activity) {}
+
+    companion object {
+        private val startedActivityCount = AtomicInteger(0)
+
+        val isAnyActivityStarted: Boolean
+            get() = startedActivityCount.get() > 0
+    }
 }

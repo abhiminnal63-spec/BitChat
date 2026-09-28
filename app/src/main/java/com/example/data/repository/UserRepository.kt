@@ -492,11 +492,20 @@ class UserRepository(
             ?: return@withContext Result.failure(IllegalArgumentException("Session account not found"))
 
         val now = System.currentTimeMillis()
-        // Mark previous local session as offline in cloud
+        // Mark previous local session as offline in cloud and disassociate this device's FCM token from old user
         _currentUserId.value?.let { oldId ->
-            userDao.updateOnlineStatus(oldId, false, now)
-            firestoreSyncManager?.updatePresenceInCloud(oldId, false, now)
-            relayEngine?.broadcastPresence(oldId, false, now)
+            if (oldId != userId) {
+                userDao.updateOnlineStatus(oldId, false, now)
+                firestoreSyncManager?.updatePresenceInCloud(oldId, false, now)
+                relayEngine?.broadcastPresence(oldId, false, now)
+                DeviceTokenManager.unregisterDeviceForUser(
+                    context = appContext,
+                    userId = oldId,
+                    userDao = userDao,
+                    firestoreSyncManager = firestoreSyncManager,
+                    relayEngine = relayEngine
+                )
+            }
         }
 
         val norm = normalizeUsername(targetUser.usernameNormalized.ifBlank { targetUser.username })
@@ -539,6 +548,13 @@ class UserRepository(
             userDao.updateOnlineStatus(id, false, now)
             firestoreSyncManager?.updatePresenceInCloud(id, false, now)
             relayEngine?.broadcastPresence(id, false, now, cacheInHistory = true)
+            DeviceTokenManager.unregisterDeviceForUser(
+                context = appContext,
+                userId = id,
+                userDao = userDao,
+                firestoreSyncManager = firestoreSyncManager,
+                relayEngine = relayEngine
+            )
             BitchatLog.presenceOffline(id)
         }
         firestoreSyncManager?.stopSync()

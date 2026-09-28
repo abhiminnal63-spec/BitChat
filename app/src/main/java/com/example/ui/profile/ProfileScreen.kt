@@ -582,7 +582,8 @@ fun ProfileScreen(
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     fontFamily = FontFamily.Monospace,
-                                    color = if (isRelayConnected) EasappOnlineGreen else colors.textSecondary
+                                    color = if (isRelayConnected) EasappOnlineGreen else colors.textSecondary,
+                                    modifier = Modifier.testTag("status_cross_device_mesh")
                                 )
                             }
 
@@ -610,7 +611,8 @@ fun ProfileScreen(
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     fontFamily = FontFamily.Monospace,
-                                    color = fsColor
+                                    color = fsColor,
+                                    modifier = Modifier.testTag("status_firestore_sync")
                                 )
                             }
 

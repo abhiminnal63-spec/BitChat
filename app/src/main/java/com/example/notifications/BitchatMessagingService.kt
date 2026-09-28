@@ -101,8 +101,8 @@ class BitchatMessagingService : FirebaseMessagingService() {
             val convDao = database.conversationDao()
             val msgDao = database.messageDao()
 
-            // Check if user is actively viewing this conversation in foreground (CASE 1)
-            val isActivelyViewing = RealtimeManager.isAppInForeground.value &&
+            // Check if user is actively viewing this conversation on an unlocked foreground screen (CASE 1)
+            val isActivelyViewing = BitchatNotificationManager.isAppEffectivelyInForeground(appContext) &&
                 RealtimeManager.isUserViewingConversation(loggedInUid, conversationId)
 
             // IMPORTANT: Do NOT mark a message as SEEN/READ merely because the push notification was delivered!

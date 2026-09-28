@@ -709,7 +709,7 @@ class GlobalRelayEngine(
                     val existingUserState = conversationDao.getUserConversationStateDirect(myUid, canonicalConvId)
                     val isRecipientMe = recipientId == myUid
                     val isViewing = isRecipientMe &&
-                        RealtimeManager.isAppInForeground.value &&
+                        BitchatNotificationManager.isAppEffectivelyInForeground(appContext) &&
                         RealtimeManager.isUserViewingConversation(myUid, canonicalConvId)
 
                     val lastReadAtForConv = conversationLastReadAt[canonicalConvId] ?: 0L
@@ -1630,7 +1630,8 @@ class GlobalRelayEngine(
         message: MessageEntity,
         senderProfile: UserEntity?,
         receiverProfile: UserEntity?,
-        compactInlineImageUri: String? = null
+        compactInlineImageUri: String? = null,
+        recipientDevices: List<UserDeviceEntity> = emptyList()
     ): Boolean = withContext(Dispatchers.IO) {
         if (currentUserId == null && message.senderId.isNotBlank()) {
             currentUserId = message.senderId
@@ -1689,6 +1690,8 @@ class GlobalRelayEngine(
             put("attachmentName", message.attachmentName ?: JSONObject.NULL)
             put("attachmentSize", message.attachmentSize ?: JSONObject.NULL)
         }
+        val tokensArray = org.json.JSONArray()
+        recipientDevices.forEach { if (it.fcmToken.isNotBlank()) tokensArray.put(it.fcmToken) }
         val pushObj = JSONObject().apply {
             put("messageId", message.id)
             put("conversationId", message.conversationId)
@@ -1700,8 +1703,10 @@ class GlobalRelayEngine(
             put("text", message.content)
             put("notificationBody", notificationBody)
             put("collapseKey", "bitchat_conv_${message.conversationId}")
+            put("notificationTag", "bitchat_conv_${message.conversationId}")
             put("groupKey", BitchatNotificationManager.GROUP_KEY_MESSAGES)
             put("channelId", BitchatNotificationManager.CHANNEL_ID)
+            put("fcmTokens", tokensArray)
             put("createdAt", message.timestamp)
         }
         val payload = JSONObject().apply {
@@ -1825,6 +1830,24 @@ class GlobalRelayEngine(
             put("device", devObj)
         }
         postPayload("$baseTopic-user-${device.userId}", payload, cacheHeader = true)
+        postPayload("$baseTopic-users", payload, cacheHeader = true)
+    }
+
+    fun publishUserDeviceRemoved(userId: String, deviceId: String, fcmToken: String? = null) {
+        val cleanUid = userId.trim()
+        val cleanDevId = deviceId.trim()
+        if (cleanUid.isBlank() || cleanDevId.isBlank()) return
+        val devObj = JSONObject().apply {
+            put("userId", cleanUid)
+            put("deviceId", cleanDevId)
+            put("fcmToken", fcmToken ?: "")
+            put("updatedAt", System.currentTimeMillis())
+        }
+        val payload = JSONObject().apply {
+            put("action", "USER_DEVICE_REMOVED")
+            put("device", devObj)
+        }
+        postPayload("$baseTopic-user-$cleanUid", payload, cacheHeader = true)
         postPayload("$baseTopic-users", payload, cacheHeader = true)
     }
 
